@@ -1,5 +1,7 @@
 # BitTorrent
 
+[Specification](https://www.bittorrent.org/beps/bep_0003.html)
+
 BitTorrent is a peer-to-peer file sharing protocol. It allows users to directly share files
 with each other without across the Internet without any central server as a middleman.
 
