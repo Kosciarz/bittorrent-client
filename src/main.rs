@@ -1,6 +1,8 @@
-use std::{env, path::Path};
+use std::{env, fs, path::Path};
 
-mod parser;
+use crate::bencode::encode_object;
+
+mod bencode;
 
 fn main() {
     let args: Vec<_> = env::args().collect();
@@ -10,7 +12,8 @@ fn main() {
 
     let path = args[1].to_string();
     let path = Path::new(&path);
-    let object = parser::decode_file(path);
+    let object = bencode::decode_file(path);
 
-    dbg!(object);
+    let bytes = fs::read(path).unwrap();
+    assert_eq!(encode_object(&object), bytes);
 }
