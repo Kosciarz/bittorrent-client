@@ -1,4 +1,6 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::collections::BTreeMap;
+
+use crate::parser::Object;
 
 const NUMBER_START: u8 = b'i';
 const NUMBER_END: u8 = b'e';
@@ -8,27 +10,12 @@ const DICTIONARY_START: u8 = b'd';
 const DICTIONARY_END: u8 = b'e';
 const BYTE_ARRAY_DIVIDER: u8 = b':';
 
-pub enum Object {
-    Number(i64),
-    ByteArray(Vec<u8>),
-    List(Vec<Object>),
-    Dictionary(BTreeMap<Vec<u8>, Object>),
-}
-
-pub fn decode_file(path: &Path) -> Object {
-    let bytes = match fs::read(path) {
-        Ok(b) => b,
-        Err(e) => panic!("{}", e),
-    };
-    decode(&bytes)
-}
-
-pub fn decode(bytes: &[u8]) -> Object {
+pub fn decode_object(bytes: &[u8]) -> Object {
     let mut iter = bytes.iter().copied().peekable();
-    decode_object(&mut iter)
+    decode(&mut iter)
 }
 
-pub fn decode_object<I>(iter: &mut std::iter::Peekable<I>) -> Object
+fn decode<I>(iter: &mut std::iter::Peekable<I>) -> Object
 where
     I: Iterator<Item = u8>,
 {
@@ -40,7 +27,7 @@ where
     };
 }
 
-pub fn decode_dictionary<I>(iter: &mut std::iter::Peekable<I>) -> Object
+fn decode_dictionary<I>(iter: &mut std::iter::Peekable<I>) -> Object
 where
     I: Iterator<Item = u8>,
 {
@@ -55,7 +42,7 @@ where
         }
 
         if let Object::ByteArray(key) = decode_byte_array(iter) {
-            let value = decode_object(iter);
+            let value = decode(iter);
             dictionary.insert(key, value);
         } else {
             panic!("invalid dictionary key");
@@ -65,7 +52,7 @@ where
     Object::Dictionary(dictionary)
 }
 
-pub fn decode_list<I>(iter: &mut std::iter::Peekable<I>) -> Object
+fn decode_list<I>(iter: &mut std::iter::Peekable<I>) -> Object
 where
     I: Iterator<Item = u8>,
 {
@@ -76,33 +63,44 @@ where
             iter.next();
             break;
         }
-        list.push(decode_object(iter))
+        list.push(decode(iter))
     }
 
     Object::List(list)
 }
 
-pub fn decode_number<I>(iter: &mut std::iter::Peekable<I>) -> Object
+fn decode_number<I>(iter: &mut std::iter::Peekable<I>) -> Object
 where
     I: Iterator<Item = u8>,
 {
     assert_eq!(iter.next(), Some(NUMBER_START));
 
     let mut bytes = Vec::new();
+    let mut found_end = false;
 
     while let Some(b) = iter.next() {
         if b == NUMBER_END {
+            found_end = true;
             break;
         }
         bytes.push(b);
     }
 
+    if !found_end {
+        panic!("Number missing terminating 'e'");
+    }
+
     let num_str = str::from_utf8(&bytes).unwrap();
+
+    if num_str.len() > 1 && num_str.starts_with('0') {
+        panic!("Leading zeros are not allowed");
+    }
+
     let number: i64 = num_str.parse().unwrap();
     Object::Number(number)
 }
 
-pub fn decode_byte_array<I>(iter: &mut std::iter::Peekable<I>) -> Object
+fn decode_byte_array<I>(iter: &mut std::iter::Peekable<I>) -> Object
 where
     I: Iterator<Item = u8>,
 {
@@ -116,6 +114,11 @@ where
     }
 
     let length_str = str::from_utf8(&length_bytes).unwrap();
+
+    if length_str.len() > 1 && length_str.starts_with('0') {
+        panic!("Leading zeros are now allowed");
+    }
+
     let length: usize = length_str.parse().unwrap();
 
     let mut bytes = Vec::new();
@@ -126,6 +129,8 @@ where
             None => panic!("Unexpected end of input when reading byte array"),
         }
     }
+
+    assert_eq!(length, bytes.len());
 
     Object::ByteArray(bytes)
 }
