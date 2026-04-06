@@ -50,25 +50,25 @@ fn get_value<'a>(
     key: &[u8],
 ) -> Result<(&'a Object, String), ExtractError> {
     let key_str = String::from_utf8_lossy(key).to_string();
-    let obj = dict
+    let value = dict
         .get(key)
         .ok_or(ExtractError::MissingKey(key_str.clone()))?;
-    Ok((obj, key_str))
+    Ok((value, key_str))
 }
 
 pub fn extract_num(dict: &BTreeMap<Vec<u8>, Object>, key: &[u8]) -> Result<i64, ExtractError> {
-    let (obj, key_str) = get_value(dict, key)?;
+    let (value, key_str) = get_value(dict, key)?;
 
-    match obj {
+    match value {
         Object::Number(num) => Ok(*num),
         _ => Err(ExtractError::InvalidKey(key_str, String::from("number"))),
     }
 }
 
 pub fn extract_str(dict: &BTreeMap<Vec<u8>, Object>, key: &[u8]) -> Result<String, ExtractError> {
-    let (obj, key_str) = get_value(dict, key)?;
+    let (value, key_str) = get_value(dict, key)?;
 
-    match obj {
+    match value {
         Object::ByteArray(bytes) => {
             String::from_utf8(bytes.clone()).map_err(|err| ExtractError::InvalidUtf8(err))
         }
@@ -83,10 +83,10 @@ pub fn extract_dict<'a>(
     dict: &'a BTreeMap<Vec<u8>, Object>,
     key: &[u8],
 ) -> Result<&'a BTreeMap<Vec<u8>, Object>, ExtractError> {
-    let (obj, key_str) = get_value(dict, key)?;
+    let (value, key_str) = get_value(dict, key)?;
 
-    match obj {
-        Object::Dictionary(dict) => Ok(dict),
+    match value {
+        Object::Dictionary(d) => Ok(d),
         _ => Err(ExtractError::InvalidKey(
             key_str,
             String::from("dictionary"),
@@ -97,10 +97,10 @@ pub fn extract_dict<'a>(
 pub fn extract_pieces<const N: usize>(
     dict: &BTreeMap<Vec<u8>, Object>,
 ) -> Result<Vec<[u8; N]>, ExtractError> {
-    let (obj, key_str) = get_value(dict, b"pieces")?;
+    let (value, key_str) = get_value(dict, b"pieces")?;
 
-    match obj {
-        Object::ByteArray(data) => chunk_array::<N>(data),
+    match value {
+        Object::ByteArray(b) => chunk_array::<N>(b),
         _ => Err(ExtractError::InvalidKey(key_str, String::from("string"))),
     }
 }

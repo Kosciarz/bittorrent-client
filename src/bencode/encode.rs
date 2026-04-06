@@ -1,15 +1,14 @@
 use std::{collections::BTreeMap};
 
 use crate::bencode::{
-    Object,
-    constants::{
+    Object, constants::{
         BYTE_ARRAY_DIVIDER, DICTIONARY_END, DICTIONARY_START, LIST_END, LIST_START, NUMBER_END,
         NUMBER_START,
-    },
+    }
 };
 
-pub fn encode_object(obj: &Object) -> Vec<u8> {
-    match obj {
+pub fn encode_object(object: &Object) -> Vec<u8> {
+    match object {
         Object::Number(n) => encode_number(*n),
         Object::ByteArray(b) => encode_byte_array(b),
         Object::List(l) => encode_list(l),

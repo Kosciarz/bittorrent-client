@@ -5,3 +5,5 @@ pub const LIST_END: u8 = b'e';
 pub const DICTIONARY_START: u8 = b'd';
 pub const DICTIONARY_END: u8 = b'e';
 pub const BYTE_ARRAY_DIVIDER: u8 = b':';
+pub const ZERO_BYTE: u8 = b'0';
+pub const NINE_BYTE: u8 = b'9';
