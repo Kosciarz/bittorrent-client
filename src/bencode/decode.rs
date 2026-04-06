@@ -34,12 +34,18 @@ impl<'a> Cursor<'a> {
     }
 }
 
-pub fn decode_object(bytes: &[u8]) -> Object {
+#[derive(Debug)]
+pub struct Parsed {
+    pub object: Object,
+    pub span: (usize, usize),
+}
+
+pub fn decode_object(bytes: &[u8]) -> Parsed {
     let mut cursor = Cursor::new(bytes);
     decode(&mut cursor)
 }
 
-fn decode(cursor: &mut Cursor) -> Object {
+fn decode(cursor: &mut Cursor) -> Parsed {
     return match cursor.peek() {
         Some(DICTIONARY_START) => decode_dictionary(cursor),
         Some(LIST_START) => decode_list(cursor),
@@ -50,13 +56,14 @@ fn decode(cursor: &mut Cursor) -> Object {
 }
 
 fn decode_key(cursor: &mut Cursor) -> Vec<u8> {
-    match decode_byte_array(cursor) {
+    match decode_byte_array(cursor).object {
         Object::ByteArray(b) => b,
         _ => panic!("Expected byte array for dictionary key"),
     }
 }
 
-fn decode_dictionary(cursor: &mut Cursor) -> Object {
+fn decode_dictionary(cursor: &mut Cursor) -> Parsed {
+    let start = cursor.position();
     assert_eq!(cursor.next().expect("Expected 'd'"), DICTIONARY_START);
 
     let mut dict = BTreeMap::new();
@@ -73,10 +80,16 @@ fn decode_dictionary(cursor: &mut Cursor) -> Object {
         dict.insert(key, value);
     }
 
-    Object::Dictionary(dict)
+    let end = cursor.position();
+
+    Parsed {
+        object: Object::Dictionary(dict),
+        span: (start, end),
+    }
 }
 
-fn decode_list(cursor: &mut Cursor) -> Object {
+fn decode_list(cursor: &mut Cursor) -> Parsed {
+    let start = cursor.position();
     assert_eq!(cursor.next().expect("Expected 'l'"), LIST_START);
 
     let mut list = Vec::new();
@@ -89,7 +102,12 @@ fn decode_list(cursor: &mut Cursor) -> Object {
         list.push(decode(cursor))
     }
 
-    Object::List(list)
+    let end = cursor.position();
+
+    Parsed {
+        object: Object::List(list),
+        span: (start, end),
+    }
 }
 
 fn read_until(cursor: &mut Cursor, terminator: u8) -> Vec<u8> {
@@ -111,17 +129,24 @@ fn parse_and_check_for_leading_zeros(bytes: &[u8]) -> &str {
     num_str
 }
 
-fn decode_number(cursor: &mut Cursor) -> Object {
+fn decode_number(cursor: &mut Cursor) -> Parsed {
+    let start = cursor.position();
     assert_eq!(cursor.next().expect("Expected 'i'"), NUMBER_START);
 
     let bytes = read_until(cursor, NUMBER_END);
     let num_str = parse_and_check_for_leading_zeros(&bytes);
     let num: i64 = num_str.parse().unwrap();
 
-    Object::Number(num)
+    let end = cursor.position();
+
+    Parsed {
+        object: Object::Number(num),
+        span: (start, end),
+    }
 }
 
-fn decode_byte_array(cursor: &mut Cursor) -> Object {
+fn decode_byte_array(cursor: &mut Cursor) -> Parsed {
+    let start = cursor.position();
     let len_bytes = read_until(cursor, BYTE_ARRAY_DIVIDER);
     let length_str = parse_and_check_for_leading_zeros(&len_bytes);
     let len: usize = length_str.parse().unwrap();
@@ -137,7 +162,12 @@ fn decode_byte_array(cursor: &mut Cursor) -> Object {
 
     assert_eq!(len, bytes.len());
 
-    Object::ByteArray(bytes)
+    let end = cursor.position();
+
+    Parsed {
+        object: Object::ByteArray(bytes),
+        span: (start, end),
+    }
 }
 
 // #[cfg(test)]

@@ -3,7 +3,6 @@ use std::{env, error::Error, fs, path::Path};
 use crate::{bencode::encode_object};
 
 mod bencode;
-mod torrent;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = env::args().collect();
@@ -15,9 +14,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let path = Path::new(&path);
 
     let bytes = fs::read(path)?;
-    let object = bencode::decode_object(&bytes);
+    let parsed = bencode::decode_object(&bytes);
 
-    assert_eq!(encode_object(&object), bytes);
+    assert_eq!(encode_object(&parsed), bytes);
 
     Ok(())
 }
