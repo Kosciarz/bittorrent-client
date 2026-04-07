@@ -31,7 +31,7 @@ impl std::fmt::Debug for Tracker {
 
 pub struct Torrent {
     announce: Tracker,
-    announce_list: Vec<Tracker>,
+    announce_list: Vec<Vec<Tracker>>,
     comment: String,
     created_by: String,
     creation_date: u64,
@@ -46,8 +46,8 @@ pub struct Torrent {
 impl Torrent {
     fn new(
         tracker: Tracker,
-        announce_list: Vec<Tracker>,
-        comment: String, 
+        announce_list: Vec<Vec<Tracker>>,
+        comment: String,
         created_by: String,
         creation_date: u64,
 
@@ -75,7 +75,7 @@ impl Torrent {
         &self.announce
     }
 
-    pub fn announce_list(&self) -> &Vec<Tracker> {
+    pub fn announce_list(&self) -> &Vec<Vec<Tracker>> {
         &self.announce_list
     }
 
@@ -84,7 +84,7 @@ impl Torrent {
     }
 
     pub fn created_by(&self) -> &String {
-        &self.comment
+        &self.created_by
     }
 
     pub fn creation_date(&self) -> u64 {
@@ -172,12 +172,16 @@ impl TryFrom<Object> for Torrent {
     }
 }
 
-fn extract_announce_list(dict: &BTreeMap<Vec<u8>, Object>) -> Result<Vec<Tracker>, ExtractError> {
+fn extract_announce_list(
+    dict: &BTreeMap<Vec<u8>, Object>,
+) -> Result<Vec<Vec<Tracker>>, ExtractError> {
     let tiers = extract_list(dict, b"announce-list")?;
 
-    let mut trackers = Vec::new();
+    let mut announce_list = Vec::new();
 
     for tier in tiers {
+        let mut trackers = Vec::new();
+
         let list = match tier.object_type() {
             ObjectType::List(l) => l,
             _ => {
@@ -204,9 +208,11 @@ fn extract_announce_list(dict: &BTreeMap<Vec<u8>, Object>) -> Result<Vec<Tracker
 
             trackers.push(Tracker::new(url));
         }
+
+        announce_list.push(trackers);
     }
 
-    Ok(trackers)
+    Ok(announce_list)
 }
 
 fn compute_info_hash(dict: &BTreeMap<Vec<u8>, Object>) -> Result<[u8; 20], ExtractError> {

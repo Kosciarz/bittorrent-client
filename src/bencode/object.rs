@@ -80,14 +80,17 @@ impl From<&Torrent> for Object {
 fn convert_announce_list(torrent: &Torrent) -> ObjectType {
     let mut announce_list = Vec::new();
 
-    for tracker in torrent.announce_list() {
-        announce_list.push(Object::new(
-            ObjectType::List(vec![Object::new(
+    for trackers in torrent.announce_list() {
+        let mut list = Vec::new();
+
+        for tracker in trackers {
+            list.push(Object::new(
                 ObjectType::ByteArray(tracker.address().as_bytes().to_vec()),
                 Vec::new(),
-            )]),
-            Vec::new(),
-        ))
+            ));
+        }
+
+        announce_list.push(Object::new(ObjectType::List(list), Vec::new()));
     }
 
     ObjectType::List(announce_list)
