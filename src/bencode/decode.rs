@@ -151,24 +151,17 @@ fn decode_key(cursor: &mut Cursor) -> Vec<u8> {
 
 fn read_until<'data>(cursor: &mut Cursor<'data>, terminator: u8) -> &'data [u8] {
     let start = cursor.position();
-    let mut found = false;
 
     while let Some(b) = cursor.peek() {
         if b == terminator {
-            found = true;
-            break;
+            let end = cursor.position();
+            cursor.next();
+            return cursor.slice(start, end);
         }
         cursor.next();
     }
 
-    let end = cursor.position();
-    if !found {
-        panic!("Terminator byte '{}' not found", terminator as char);
-    }
-
-    cursor.next();
-
-    cursor.slice(start, end)
+    panic!("Terminator byte '{}' not found", terminator as char);
 }
 
 fn parse_and_check_for_leading_zeros(bytes: &[u8]) -> &str {
