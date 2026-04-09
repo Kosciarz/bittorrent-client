@@ -1,33 +1,15 @@
 use std::{collections::BTreeMap, error::Error, fs, io, path::Path};
 
+use rand::RngExt;
 use sha1::{Digest, Sha1};
 
-use crate::bencode::{
-    self, ExtractError, Object, ObjectType, decode_object,
-    object::{extract_byte_array, extract_dict, extract_list, extract_num, extract_str},
+use crate::{
+    bencode::{
+        self, ExtractError, Object, ObjectType, decode_object,
+        object::{extract_byte_array, extract_dict, extract_list, extract_num, extract_str},
+    },
+    tracker::{AnnounceInfo, Tracker},
 };
-
-pub struct Tracker {
-    pub address: String,
-}
-
-impl Tracker {
-    fn new(address: String) -> Self {
-        Self { address }
-    }
-
-    pub fn address(&self) -> &String {
-        &self.address
-    }
-}
-
-impl std::fmt::Debug for Tracker {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Tracker")
-            .field("address", &self.address)
-            .finish()
-    }
-}
 
 pub struct Torrent {
     announce: Tracker,
@@ -41,36 +23,13 @@ pub struct Torrent {
     piece_length: u64,
     pieces: Vec<[u8; 20]>,
     info_hash: [u8; 20],
+
+    downloaded: u64,
+    left: u64,
+    uploaded: u64,
 }
 
 impl Torrent {
-    fn new(
-        tracker: Tracker,
-        announce_list: Vec<Vec<Tracker>>,
-        comment: String,
-        created_by: String,
-        creation_date: u64,
-
-        name: String,
-        length: u64,
-        piece_length: u64,
-        pieces: Vec<[u8; 20]>,
-        info_hash: [u8; 20],
-    ) -> Self {
-        Self {
-            announce: tracker,
-            announce_list,
-            comment,
-            created_by,
-            creation_date,
-            name,
-            length,
-            piece_length,
-            pieces,
-            info_hash,
-        }
-    }
-
     pub fn announce(&self) -> &Tracker {
         &self.announce
     }
@@ -111,6 +70,18 @@ impl Torrent {
         &self.info_hash
     }
 
+    pub fn downloaded(&self) -> u64 {
+        self.downloaded
+    }
+
+    pub fn left(&self) -> u64 {
+        self.left
+    }
+
+    pub fn uploaded(&self) -> u64 {
+        self.uploaded
+    }
+
     pub fn load_from_file(path: &Path) -> Result<Torrent, Box<dyn Error>> {
         let bytes = fs::read(path)?;
         let obj = decode_object(&bytes);
@@ -128,6 +99,22 @@ impl Torrent {
             ),
             bytes,
         )?;
+        Ok(())
+    }
+
+    pub fn update_trackers(&mut self) -> Result<(), Box<dyn Error>> {
+        let peer_id = random_digit_string(20);
+        let peer_port = 12345;
+
+        self.announce.update(&AnnounceInfo::new(
+            &self.info_hash,
+            &peer_id,
+            peer_port,
+            self.downloaded,
+            self.left,
+            self.uploaded,
+        ))?;
+
         Ok(())
     }
 }
@@ -157,7 +144,7 @@ impl TryFrom<Object> for Torrent {
         let pieces = extract_pieces(&info_obj)?;
         let info_hash = compute_info_hash(&dict)?;
 
-        Ok(Torrent::new(
+        Ok(Torrent {
             announce,
             announce_list,
             comment,
@@ -168,7 +155,10 @@ impl TryFrom<Object> for Torrent {
             piece_length,
             pieces,
             info_hash,
-        ))
+            downloaded: 0,
+            left: length,
+            uploaded: 0,
+        })
     }
 }
 
@@ -241,4 +231,16 @@ fn chunk_array<const N: usize>(data: &[u8]) -> Result<Vec<[u8; N]>, ExtractError
     }
 
     Ok(result)
+}
+
+fn random_digit_string(len: usize) -> String {
+    static CHARSET: &[u8] = b"0123456789";
+    let mut rng = rand::rng();
+
+    (0..len)
+        .map(|_| {
+            let idx = rng.random_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect()
 }

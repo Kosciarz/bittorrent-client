@@ -39,7 +39,7 @@ impl From<&Torrent> for Object {
         dict.insert(
             b"announce".to_vec(),
             Object::new(
-                ObjectType::ByteArray(torrent.announce().address().as_bytes().to_vec()),
+                ObjectType::ByteArray(torrent.announce().url().as_bytes().to_vec()),
                 Vec::new(),
             ),
         );
@@ -85,7 +85,7 @@ fn convert_announce_list(torrent: &Torrent) -> ObjectType {
 
         for tracker in trackers {
             list.push(Object::new(
-                ObjectType::ByteArray(tracker.address().as_bytes().to_vec()),
+                ObjectType::ByteArray(tracker.url().as_bytes().to_vec()),
                 Vec::new(),
             ));
         }
