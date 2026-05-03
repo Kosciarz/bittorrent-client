@@ -1,18 +1,21 @@
-use std::{collections::BTreeMap, error::Error, fs, io, path::Path};
+use std::{collections::BTreeMap, fs, io, path::Path};
 
+use anyhow::{Context, Result, anyhow};
 use rand::RngExt;
 use sha1::{Digest, Sha1};
+use url::Url;
 
 use crate::{
     bencode::{
         self, ExtractError, Object, ObjectType, decode_object,
         object::{extract_byte_array, extract_dict, extract_list, extract_num, extract_str},
     },
-    tracker::{AnnounceInfo, Tracker},
+    peer::Peer,
+    tracker::{AnnounceStats, Tracker},
 };
 
 pub struct Torrent {
-    announce: Tracker,
+    tracker: Tracker,
     announce_list: Vec<Vec<Tracker>>,
     comment: String,
     created_by: String,
@@ -27,22 +30,24 @@ pub struct Torrent {
     downloaded: u64,
     left: u64,
     uploaded: u64,
+
+    peers: Vec<Peer>,
 }
 
 impl Torrent {
     pub fn announce(&self) -> &Tracker {
-        &self.announce
+        &self.tracker
     }
 
     pub fn announce_list(&self) -> &Vec<Vec<Tracker>> {
         &self.announce_list
     }
 
-    pub fn comment(&self) -> &String {
+    pub fn comment(&self) -> &str {
         &self.comment
     }
 
-    pub fn created_by(&self) -> &String {
+    pub fn created_by(&self) -> &str {
         &self.created_by
     }
 
@@ -50,7 +55,7 @@ impl Torrent {
         self.creation_date
     }
 
-    pub fn name(&self) -> &String {
+    pub fn name(&self) -> &str {
         &self.name
     }
 
@@ -62,7 +67,7 @@ impl Torrent {
         self.piece_length
     }
 
-    pub fn pieces(&self) -> &Vec<[u8; 20]> {
+    pub fn pieces(&self) -> &[[u8; 20]] {
         &self.pieces
     }
 
@@ -82,7 +87,7 @@ impl Torrent {
         self.uploaded
     }
 
-    pub fn load_from_file(path: &Path) -> Result<Torrent, Box<dyn Error>> {
+    pub fn load_from_file(path: &Path) -> Result<Torrent> {
         let bytes = fs::read(path)?;
         let obj = decode_object(&bytes);
         Torrent::try_from(obj)
@@ -102,50 +107,69 @@ impl Torrent {
         Ok(())
     }
 
-    pub fn update_trackers(&mut self) -> Result<(), Box<dyn Error>> {
-        let client_id = generate_client_id();
-        let peer_port = 12345;
+    pub async fn update_trackers(&mut self) -> Result<()> {
+        let peer_id = generate_client_id();
+        let port = 12345;
 
-        self.announce.announce(&AnnounceInfo::new(
-            &self.info_hash,
-            &client_id,
-            peer_port,
-            self.downloaded,
-            self.left,
-            self.uploaded,
-        ))?;
+        let addrs = self
+            .tracker
+            .announce(
+                &self.info_hash,
+                &peer_id,
+                port,
+                &AnnounceStats {
+                    uploaded: self.uploaded,
+                    downloaded: self.downloaded,
+                    left: self.left,
+                },
+            )
+            .await?;
+
+        for addr in addrs {
+            self.peers.push(Peer::new(addr));
+        }
+
+        for peer in &mut self.peers {
+            println!("\nTrying peer {}", peer.addr());
+            match peer.connect(&self.info_hash, &peer_id) {
+                Ok(_) => break,
+                Err(e) => println!("Peer {} failed: {e}", peer.addr()),
+            }
+        }
 
         Ok(())
     }
 }
 
 impl TryFrom<Object> for Torrent {
-    type Error = Box<dyn std::error::Error>;
+    type Error = anyhow::Error;
 
-    fn try_from(object: Object) -> Result<Self, Self::Error> {
+    fn try_from(object: Object) -> Result<Self> {
         let dict = match object.object_type() {
             ObjectType::Dictionary(d) => d,
-            _ => return Err("Top level object is not a dictionary".into()),
+            _ => return Err(anyhow!("Top level object is not a dictionary")),
         };
 
-        let announce = Tracker::new(extract_str(&dict, b"announce")?);
+        let announce = Tracker::new(
+            Url::parse(&extract_str(&dict, b"announce")?).context("invalid announce URL")?,
+        );
         let announce_list = extract_announce_list(&dict)?;
         let comment = extract_str(&dict, b"comment")?;
         let created_by = extract_str(&dict, b"created by")?;
         let creation_date = u64::try_from(extract_num(&dict, b"creation date")?)
-            .map_err(|_| "creation date is negative or too large")?;
+            .map_err(|_| anyhow!("creation date is negative or too large"))?;
 
         let info_obj = extract_dict(&dict, b"info")?;
         let name = extract_str(&info_obj, b"name")?;
         let length = u64::try_from(extract_num(&info_obj, b"length")?)
-            .map_err(|_| "length is negative or too large")?;
+            .map_err(|_| anyhow!("length is negative or too large"))?;
         let piece_length = u64::try_from(extract_num(&info_obj, b"piece length")?)
-            .map_err(|_| "piece length is negative or too large")?;
+            .map_err(|_| anyhow!("piece length is negative or too large"))?;
         let pieces = extract_pieces(&info_obj)?;
         let info_hash = compute_info_hash(&dict)?;
 
         Ok(Torrent {
-            announce,
+            tracker: announce,
             announce_list,
             comment,
             created_by,
@@ -158,13 +182,12 @@ impl TryFrom<Object> for Torrent {
             downloaded: 0,
             left: length,
             uploaded: 0,
+            peers: Vec::new(),
         })
     }
 }
 
-fn extract_announce_list(
-    dict: &BTreeMap<Vec<u8>, Object>,
-) -> Result<Vec<Vec<Tracker>>, ExtractError> {
+fn extract_announce_list(dict: &BTreeMap<Vec<u8>, Object>) -> Result<Vec<Vec<Tracker>>> {
     let tiers = extract_list(dict, b"announce-list")?;
 
     let mut announce_list = Vec::new();
@@ -175,10 +198,7 @@ fn extract_announce_list(
         let list = match tier.object_type() {
             ObjectType::List(l) => l,
             _ => {
-                return Err(ExtractError::InvalidKey(
-                    "announce-list".into(),
-                    "list".into(),
-                ));
+                return Err(ExtractError::InvalidKey("announce-list".into(), "list".into()).into());
             }
         };
 
@@ -189,14 +209,15 @@ fn extract_announce_list(
                     return Err(ExtractError::InvalidKey(
                         "announce-list".into(),
                         "byte string".into(),
-                    ));
+                    )
+                    .into());
                 }
             };
 
             let url =
                 String::from_utf8(bytes.to_vec()).map_err(|err| ExtractError::InvalidUtf8(err))?;
 
-            trackers.push(Tracker::new(url));
+            trackers.push(Tracker::new(Url::parse(&url)?));
         }
 
         announce_list.push(trackers);

@@ -1,9 +1,10 @@
 use std::{
-    error::Error,
     io::{self, Read, Write},
-    net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
+    net::{SocketAddr, TcpStream},
     time::Duration,
 };
+
+use anyhow::{Result, anyhow};
 
 const HANDSHAKE_SIZE: usize = 68;
 
@@ -15,12 +16,9 @@ pub struct Peer {
 }
 
 impl Peer {
-    pub fn from_bytes(bytes: &[u8]) -> Self {
+    pub fn new(addr: SocketAddr) -> Self {
         Self {
-            addr: SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3])),
-                u16::from_be_bytes([bytes[4], bytes[5]]),
-            ),
+            addr,
             chocked: true,
             interested: false,
         }
@@ -38,7 +36,7 @@ impl Peer {
         self.interested
     }
 
-    pub fn connect(&mut self, info_hash: &[u8], client_id: &[u8]) -> Result<(), Box<dyn Error>> {
+    pub fn connect(&mut self, info_hash: &[u8], client_id: &[u8]) -> Result<()> {
         let mut connection = PeerConnection::new(&self.addr)?;
         println!("Connected to peer: {}", self.addr);
 
@@ -48,32 +46,6 @@ impl Peer {
 
         Ok(())
     }
-}
-
-#[derive(Debug)]
-enum Message {
-    KeepAlive,
-    Choke,
-    Unchoke,
-    Interested,
-    NotInterested,
-    Have(u32),
-    Bitfield(Vec<u8>),
-    Request {
-        index: u32,
-        begin: u32,
-        length: u32,
-    },
-    Piece {
-        index: u32,
-        begin: u32,
-        block: Vec<u8>,
-    },
-    Cancel {
-        index: u32,
-        begin: u32,
-        length: u32,
-    },
 }
 
 #[derive(Debug)]
@@ -117,24 +89,24 @@ impl PeerConnection {
         Ok(())
     }
 
-    fn read_handshake(&mut self, info_hash: &[u8]) -> Result<(), Box<dyn Error>> {
+    fn read_handshake(&mut self, info_hash: &[u8]) -> Result<()> {
         let mut buffer = [0u8; HANDSHAKE_SIZE];
 
         self.stream.read_exact(&mut buffer)?;
 
         if buffer[0] != 19 {
-            return Err("Invalid pstrlen".into());
+            return Err(anyhow!("Invalid pstrlen"));
         }
 
         if &buffer[1..20] != b"BitTorrent protocol" {
-            return Err("Invalid pstr".into());
+            return Err(anyhow!("Invalid pstr"));
         }
 
         let mut reserved = Vec::new();
         reserved.extend_from_slice(&buffer[20..28]);
 
         if &buffer[28..48] != info_hash {
-            return Err("Info hash does not match".into());
+            return Err(anyhow!("Info hash does not match"));
         }
 
         let mut peer_id = Vec::new();
@@ -152,24 +124,50 @@ impl PeerConnection {
         Ok(())
     }
 
-    fn read_loop(&mut self) -> io::Result<()> {
+    fn read_loop(&mut self) -> Result<()> {
         loop {
             let mut len_buf = [0u8; 4];
             self.stream.read_exact(&mut len_buf)?;
             let len = u32::from_be_bytes(len_buf);
 
             if len == 0 {
-                println!("<- keep alive");
+                println!("Message: Keep alive");
                 continue;
             }
 
             let mut buf = vec![0u8; len.try_into().unwrap()];
             self.stream.read_exact(&mut buf)?;
-            let message = Message::decode(&buf);
+            let message = Message::decode(&buf)?;
 
             println!("Message: {:?}", message);
         }
     }
+}
+
+#[derive(Debug)]
+enum Message {
+    KeepAlive,
+    Choke,
+    Unchoke,
+    Interested,
+    NotInterested,
+    Have(u32),
+    Bitfield(Vec<u8>),
+    Request {
+        index: u32,
+        begin: u32,
+        length: u32,
+    },
+    Piece {
+        index: u32,
+        begin: u32,
+        block: Vec<u8>,
+    },
+    Cancel {
+        index: u32,
+        begin: u32,
+        length: u32,
+    },
 }
 
 impl Message {
@@ -271,8 +269,8 @@ impl Message {
         buf
     }
 
-    fn decode(buf: &[u8]) -> Result<Message, String> {
-        let id = buf.first().ok_or_else(|| String::from("Id missing"))?;
+    fn decode(buf: &[u8]) -> Result<Message> {
+        let id = buf.first().ok_or_else(|| anyhow!("Id missing"))?;
         let buf = &buf[1..];
 
         Ok(match id {
@@ -285,7 +283,7 @@ impl Message {
             6 => Self::decode_request(buf),
             7 => Self::decode_piece(buf),
             8 => Self::decode_cancel(buf),
-            _ => return Err("Invalid id".into()),
+            _ => return Err(anyhow!("Invalid id")),
         })
     }
 

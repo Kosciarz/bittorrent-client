@@ -1,159 +1,107 @@
-use std::{error::Error, time::Duration};
-
-use crate::{
-    bencode::{
-        ObjectType, decode_object,
-        object::{extract_byte_array, extract_num},
-    },
-    peer::Peer,
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    time::{Duration, Instant},
 };
 
+use anyhow::{Result, anyhow};
+use url::Url;
+
+use crate::bencode::{
+    ObjectType, decode_object,
+    object::{extract_byte_array, extract_num},
+};
+
+#[derive(Debug)]
+pub struct AnnounceStats {
+    pub uploaded: u64,
+    pub downloaded: u64,
+    pub left: u64,
+}
+
 pub struct Tracker {
-    url: String,
+    url: Url,
     interval: Duration,
-    peers: Vec<Peer>,
-}
-
-#[derive(Debug)]
-pub struct AnnounceInfo<'a> {
-    info_hash: &'a [u8],
-    client_id: &'a [u8; 20],
-    peer_port: u16,
-    downloaded: u64,
-    left: u64,
-    uploaded: u64,
-}
-
-impl<'a> AnnounceInfo<'a> {
-    pub fn new(
-        info_hash: &'a [u8],
-        client_id: &'a [u8; 20],
-        peer_port: u16,
-        downloaded: u64,
-        left: u64,
-        uploaded: u64,
-    ) -> Self {
-        Self {
-            info_hash,
-            client_id,
-            peer_port,
-            downloaded,
-            left,
-            uploaded,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct AnnounceResult {
-    complete: i64,
-    incomplete: i64,
-    interval: i64,
-    peers: Vec<u8>,
+    last_announce: Option<Instant>,
 }
 
 impl Tracker {
-    pub fn new(url: String) -> Self {
+    pub fn new(url: Url) -> Self {
         Self {
             url,
-            interval: Duration::ZERO,
-            peers: Vec::new(),
+            interval: Duration::from_secs(1800),
+            last_announce: None,
         }
     }
 
-    pub fn url(&self) -> &str {
+    pub fn url(&self) -> &Url {
         &self.url
     }
 
-    pub fn interval(&self) -> Duration {
-        self.interval
+    pub fn interval(&self) -> &Duration {
+        &self.interval
     }
 
-    pub fn set_interval(&mut self, interval: Duration) {
-        self.interval = interval;
-    }
-
-    pub fn peers(&self) -> &Vec<Peer> {
-        &self.peers
-    }
-
-    pub fn announce(&mut self, announce_info: &AnnounceInfo) -> Result<(), Box<dyn Error>> {
-        let url_encoded_info_hash = urlencoding::encode_binary(announce_info.info_hash);
-        let url_encoded_client_id = urlencoding::encode_binary(announce_info.client_id);
-
-        let url = format!(
-            "{}?info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&compact=1",
-            self.url,
-            url_encoded_info_hash,
-            url_encoded_client_id,
-            announce_info.peer_port,
-            announce_info.uploaded,
-            announce_info.downloaded,
-            announce_info.left,
-        );
-
-        let announce_result = self.send_announce_request(&url)?;
-
-        println!(
-            "Complete: {}\nIncomplete: {}\nInterval: {}\nPeers: {:?}",
-            announce_result.complete,
-            announce_result.incomplete,
-            announce_result.interval,
-            announce_result.peers
-        );
-
-        self.set_interval(Duration::from_secs(u64::try_from(
-            announce_result.interval,
-        )?));
-
-        self.extract_peers(&announce_result.peers)?;
-
-        for peer in &mut self.peers {
-            println!("\nTrying peer {}", peer.addr());
-            match peer.connect(announce_info.info_hash, announce_info.client_id) {
-                Ok(_) => break,
-                Err(e) => println!("Peer {} failed: {e}", peer.addr()),
-            }
-        }
-
-        Ok(())
-    }
-
-    fn send_announce_request(&self, url: &str) -> Result<AnnounceResult, Box<dyn Error>> {
-        let res = reqwest::blocking::get(url)?.bytes()?;
+    pub async fn announce(
+        &mut self,
+        info_hash: &[u8; 20],
+        peer_id: &[u8; 20],
+        port: u16,
+        stats: &AnnounceStats,
+    ) -> Result<Vec<SocketAddr>> {
+        let url = self.build_announce_url(info_hash, peer_id, port, stats);
+        let res = reqwest::get(url).await?.bytes().await?;
         let obj = decode_object(&res);
 
-        match obj.object_type() {
-            ObjectType::Dictionary(d) => {
-                let complete = extract_num(&d, b"complete")?;
-                let incomplete = extract_num(&d, b"incomplete")?;
-                let interval = extract_num(&d, b"interval")?;
-                let peers = extract_byte_array(&d, b"peers")?;
+        let dict = match obj.object_type() {
+            ObjectType::Dictionary(d) => d,
+            _ => return Err(anyhow!("Expected a dictionary")),
+        };
 
-                Ok(AnnounceResult {
-                    complete,
-                    incomplete,
-                    interval,
-                    peers,
-                })
-            }
-            _ => Err("Expected a dictionary".into()),
-        }
+        self.interval = Duration::from_secs(extract_num(&dict, b"interval")? as u64);
+        self.last_announce = Some(Instant::now());
+
+        let peers_bytes = extract_byte_array(&dict, b"peers")?;
+
+        Ok(Self::parse_compact_peers(&peers_bytes))
     }
 
-    fn extract_peers(&mut self, data: &[u8]) -> Result<(), String> {
-        if data.len() % 6 != 0 {
-            return Err(format!("Peer list has invalid length: {}", data.len()).into());
-        }
+    fn build_announce_url(
+        &self,
+        info_hash: &[u8; 20],
+        peer_id: &[u8; 20],
+        port: u16,
+        stats: &AnnounceStats,
+    ) -> Url {
+        let info_hash = urlencoding::encode_binary(info_hash);
+        let peer_id = urlencoding::encode_binary(peer_id);
 
-        for chunk in data.chunks(6) {
-            let mut arr = [0u8; 6];
-            arr.copy_from_slice(chunk);
-            let peer = Peer::from_bytes(&arr);
-            self.peers.push(peer);
-        }
+        let mut url = self.url.clone();
+        url.query_pairs_mut()
+            .append_pair("port", &port.to_string())
+            .append_pair("uploaded", &stats.uploaded.to_string())
+            .append_pair("downloaded", &stats.downloaded.to_string())
+            .append_pair("left", &stats.left.to_string())
+            .append_pair("compact", "1");
 
-        Ok(())
+        let query = format!(
+            "{}&info_hash={}&peer_id={}",
+            url.query().unwrap_or(""),
+            info_hash,
+            peer_id
+        );
+        url.set_query(Some(&query));
+        url
+    }
+
+    fn parse_compact_peers(bytes: &[u8]) -> Vec<SocketAddr> {
+        bytes
+            .chunks_exact(6)
+            .map(|chunk| {
+                let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
+                let port = u16::from_be_bytes([chunk[4], chunk[5]]);
+                SocketAddr::from((ip, port))
+            })
+            .collect()
     }
 }
 
