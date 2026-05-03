@@ -106,11 +106,14 @@ impl Tracker {
             announce_result.interval,
         )?));
 
-        let peer = Peer::from_bytes(&announce_result.peers);
-        self.peers.push(peer);
+        self.extract_peers(&announce_result.peers)?;
 
         for peer in &mut self.peers {
-            peer.connect(announce_info.info_hash, announce_info.client_id)?;
+            println!("\nTrying peer {}", peer.addr());
+            match peer.connect(announce_info.info_hash, announce_info.client_id) {
+                Ok(_) => break,
+                Err(e) => println!("Peer {} failed: {e}", peer.addr()),
+            }
         }
 
         Ok(())
@@ -119,8 +122,6 @@ impl Tracker {
     fn send_announce_request(&self, url: &str) -> Result<AnnounceResult, Box<dyn Error>> {
         let res = reqwest::blocking::get(url)?.bytes()?;
         let obj = decode_object(&res);
-
-        println!("Announce result: {:?}", &res);
 
         match obj.object_type() {
             ObjectType::Dictionary(d) => {
@@ -138,6 +139,21 @@ impl Tracker {
             }
             _ => Err("Expected a dictionary".into()),
         }
+    }
+
+    fn extract_peers(&mut self, data: &[u8]) -> Result<(), String> {
+        if data.len() % 6 != 0 {
+            return Err(format!("Peer list has invalid length: {}", data.len()).into());
+        }
+
+        for chunk in data.chunks(6) {
+            let mut arr = [0u8; 6];
+            arr.copy_from_slice(chunk);
+            let peer = Peer::from_bytes(&arr);
+            self.peers.push(peer);
+        }
+
+        Ok(())
     }
 }
 
