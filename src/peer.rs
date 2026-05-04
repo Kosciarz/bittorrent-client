@@ -1,19 +1,46 @@
 use std::{
     io::{self, Read, Write},
-    net::{SocketAddr, TcpStream},
+    net::SocketAddr,
     time::Duration,
 };
 
 use anyhow::{Result, anyhow};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 const HANDSHAKE_SIZE: usize = 68;
 
 #[derive(Debug, Clone)]
+struct BitField {
+    pub bytes: Vec<u8>,
+    pub num_pieces: usize,
+}
+
+impl BitField {
+    pub fn new(bytes: Vec<u8>, num_pieces: usize) -> Self {
+        Self { bytes, num_pieces }
+    }
+
+    pub fn has_piece(&self, index: usize) -> bool {
+        if index >= self.num_pieces {
+            return false;
+        }
+
+        let byte = index / 8;
+        let bit = 7 - (index % 8);
+        self.bytes[byte] & (1 << bit) != 0
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Peer {
     addr: SocketAddr,
-    bitfield: Option<Vec<u8>>,
+    bitfield: Option<BitField>,
     chocked: bool,
     interested: bool,
+    peer_id: [u8; 20],
 }
 
 impl Peer {
@@ -23,6 +50,7 @@ impl Peer {
             bitfield: None,
             chocked: true,
             interested: false,
+            peer_id: [0u8; 20],
         }
     }
 
@@ -40,40 +68,58 @@ impl Peer {
 }
 
 #[derive(Debug)]
-pub struct PeerConnection<'a> {
-    peer: &'a mut Peer,
+pub struct PeerConnection {
+    peer: Peer,
     stream: TcpStream,
+    num_pieces: usize,
 }
 
-impl<'a> PeerConnection<'a> {
-    pub fn connect(
-        peer: &'a mut Peer,
+impl PeerConnection {
+    pub async fn connect(
+        mut peer: Peer,
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
-    ) -> Result<PeerConnection<'a>> {
-        let stream = TcpStream::connect_timeout(&peer.addr(), Duration::from_secs(5))?;
+        num_pieces: usize,
+    ) -> Result<Self, (Peer, anyhow::Error)> {
+        let mut stream = match TcpStream::connect(&peer.addr()).await {
+            Ok(s) => s,
+            Err(e) => return Err((peer, e.into())),
+        };
 
-        let mut connection = PeerConnection { peer, stream };
+        let handshake = &Self::build_handshake(info_hash, peer_id);
+        if let Err(e) = stream.write_all(handshake).await {
+            return Err((peer, e.into()));
+        }
 
-        connection.send_handshake(info_hash, peer_id)?;
-        connection.read_handshake(info_hash)?;
+        let mut buf = [0u8; HANDSHAKE_SIZE];
+        if let Err(e) = stream.read_exact(&mut buf).await {
+            return Err((peer, e.into()));
+        }
 
-        println!("Connected to peer: {}", connection.peer.addr());
+        if buf[0] != 19 {
+            return Err((peer, anyhow!("Invalid pstrlen")));
+        }
 
-        connection.read_loop()?;
+        if &buf[1..20] != b"BitTorrent protocol" {
+            return Err((peer, anyhow!("Invalid pstr")));
+        }
 
-        Ok(connection)
+        if &buf[28..48] != info_hash {
+            return Err((peer, anyhow!("Info hash does not match")));
+        }
+
+        peer.peer_id = buf[48..68].try_into().unwrap();
+
+        println!("Connected to peer: {}", peer.addr());
+
+        Ok(PeerConnection {
+            peer,
+            stream,
+            num_pieces,
+        })
     }
 
-    fn send_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.stream.write_all(bytes)
-    }
-
-    fn send_handshake(&mut self, info_hash: &[u8], client_id: &[u8]) -> io::Result<()> {
-        self.send_bytes(&Self::encode_handshake(info_hash, client_id))
-    }
-
-    fn encode_handshake(info_hash: &[u8], client_id: &[u8]) -> Vec<u8> {
+    fn build_handshake(info_hash: &[u8], client_id: &[u8]) -> Vec<u8> {
         let mut handshake = Vec::with_capacity(HANDSHAKE_SIZE);
 
         handshake.push(19);
@@ -85,34 +131,10 @@ impl<'a> PeerConnection<'a> {
         handshake
     }
 
-    fn read_handshake(&mut self, info_hash: &[u8]) -> Result<()> {
-        let mut buffer = [0u8; HANDSHAKE_SIZE];
-
-        self.stream.read_exact(&mut buffer)?;
-
-        if buffer[0] != 19 {
-            return Err(anyhow!("Invalid pstrlen"));
-        }
-
-        if &buffer[1..20] != b"BitTorrent protocol" {
-            return Err(anyhow!("Invalid pstr"));
-        }
-
-        if &buffer[28..48] != info_hash {
-            return Err(anyhow!("Info hash does not match"));
-        }
-
-        Ok(())
-    }
-
-    pub fn read_loop(&mut self) -> Result<()> {
+    pub async fn read_loop(&mut self) -> Result<()> {
         loop {
-            if let Some(_) = &self.peer.bitfield {
-                println!("Bitfield read!");
-            }
-
             let mut len_buf = [0u8; 4];
-            self.stream.read_exact(&mut len_buf)?;
+            self.stream.read_exact(&mut len_buf).await?;
             let len = u32::from_be_bytes(len_buf);
 
             if len == 0 {
@@ -121,13 +143,13 @@ impl<'a> PeerConnection<'a> {
             }
 
             let mut buf = vec![0u8; len.try_into().unwrap()];
-            self.stream.read_exact(&mut buf)?;
+            self.stream.read_exact(&mut buf).await?;
             let message = Message::decode(&buf)?;
 
             match &message {
                 Message::Bitfield(bitfield) => {
-                    self.peer.bitfield = Some(bitfield.to_vec());
-                },
+                    self.peer.bitfield = Some(BitField::new(bitfield.to_vec(), self.num_pieces));
+                }
                 _ => {}
             }
 

@@ -27,7 +27,7 @@ impl Client {
         let path = Path::new(&path);
         let mut torrent = Torrent::load_from_file(path)?;
         torrent.update_trackers(self).await?;
-        torrent.connect_peers(self)?;
+        torrent.connect_peers(self).await?;
 
         Ok(())
     }

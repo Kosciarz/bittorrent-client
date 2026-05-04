@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs, io, path::Path};
+use std::{collections::BTreeMap, fs, io, net::SocketAddr, path::Path};
 
 use anyhow::{Context, Result, anyhow};
 use sha1::{Digest, Sha1};
@@ -122,24 +122,30 @@ impl Torrent {
             )
             .await?;
 
+        self.add_peers(addrs);
+
+        Ok(())
+    }
+
+    pub fn add_peers(&mut self, addrs: Vec<SocketAddr>) {
         for addr in addrs {
             if !self.peers.iter().any(|p| p.addr() == addr) {
                 self.peers.push(Peer::new(addr));
             }
         }
-
-        Ok(())
     }
 
-    pub fn connect_peers(&mut self, client: &Client) -> Result<()> {
-        for peer in &mut self.peers.clone() {
+    pub async fn connect_peers(&mut self, client: &Client) -> Result<()> {
+        for peer in self.peers.clone() {
             println!("\nTrying peer {}", peer.addr());
 
-            match PeerConnection::connect(peer, &self.info_hash, &client.peer_id) {
+            match PeerConnection::connect(peer, &self.info_hash, &client.peer_id, self.pieces.len())
+                .await
+            {
                 Ok(mut conn) => {
-                    conn.read_loop()?;
-                },
-                Err(e) => println!("Peer {} failed: {e}", peer.addr()),
+                    conn.read_loop().await?;
+                }
+                Err((peer, e)) => println!("Peer {} failed: {e}", peer.addr()),
             };
         }
 
