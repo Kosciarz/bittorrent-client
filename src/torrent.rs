@@ -10,7 +10,7 @@ use crate::{
         object::{extract_byte_array, extract_dict, extract_list, extract_num, extract_str},
     },
     client::Client,
-    peer::Peer,
+    peer::{Peer, PeerConnection},
     tracker::{AnnounceStats, Tracker},
 };
 
@@ -132,12 +132,15 @@ impl Torrent {
     }
 
     pub fn connect_peers(&mut self, client: &Client) -> Result<()> {
-        for peer in &mut self.peers {
+        for peer in &mut self.peers.clone() {
             println!("\nTrying peer {}", peer.addr());
-            match peer.connect(&self.info_hash, &client.peer_id) {
-                Ok(_) => break,
+
+            match PeerConnection::connect(peer, &self.info_hash, &client.peer_id) {
+                Ok(mut conn) => {
+                    conn.read_loop()?;
+                },
                 Err(e) => println!("Peer {} failed: {e}", peer.addr()),
-            }
+            };
         }
 
         Ok(())
