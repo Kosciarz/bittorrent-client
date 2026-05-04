@@ -158,7 +158,9 @@ impl PeerConnection {
 
     pub async fn read_first_message(&mut self) -> Result<()> {
         loop {
-            match self.read_message().await? {
+            let message = self.read_message().await?;
+
+            match &message {
                 Message::KeepAlive => continue,
                 Message::Unchoke => self.peer.chocked = false,
                 Message::Bitfield(b) => {
@@ -167,12 +169,18 @@ impl PeerConnection {
                 _ => break,
             }
 
+            println!("{:?}", message);
+
             if self.peer.has_bitfield() && !self.peer.chocked() {
                 break;
             }
         }
 
         Ok(())
+    }
+
+    pub async fn send_interested(&mut self) -> Result<()> {
+        self.send_message(Message::Interested).await
     }
 }
 
