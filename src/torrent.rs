@@ -143,7 +143,8 @@ impl Torrent {
                 .await
             {
                 Ok(mut conn) => {
-                    conn.read_loop().await?;
+                    conn.read_first_message().await?;
+                    break;
                 }
                 Err((peer, e)) => println!("Peer {} failed: {e}", peer.addr()),
             };

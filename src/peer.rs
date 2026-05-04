@@ -1,19 +1,16 @@
-use std::{
-    io::{self, Read, Write},
-    net::SocketAddr,
-    time::Duration,
-};
+use std::{net::SocketAddr, time::Duration};
 
 use anyhow::{Result, anyhow};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    time::timeout,
 };
 
 const HANDSHAKE_SIZE: usize = 68;
 
 #[derive(Debug, Clone)]
-struct BitField {
+pub struct BitField {
     pub bytes: Vec<u8>,
     pub num_pieces: usize,
 }
@@ -38,9 +35,9 @@ impl BitField {
 pub struct Peer {
     addr: SocketAddr,
     bitfield: Option<BitField>,
+    peer_id: [u8; 20],
     chocked: bool,
     interested: bool,
-    peer_id: [u8; 20],
 }
 
 impl Peer {
@@ -65,6 +62,14 @@ impl Peer {
     pub fn interested(&self) -> bool {
         self.interested
     }
+
+    pub fn set_bitfield(&mut self, bitfield: BitField) {
+        self.bitfield = Some(bitfield);
+    }
+
+    pub fn has_bitfield(&self) -> bool {
+        self.bitfield.is_some()
+    }
 }
 
 #[derive(Debug)]
@@ -81,10 +86,12 @@ impl PeerConnection {
         peer_id: &[u8; 20],
         num_pieces: usize,
     ) -> Result<Self, (Peer, anyhow::Error)> {
-        let mut stream = match TcpStream::connect(&peer.addr()).await {
-            Ok(s) => s,
-            Err(e) => return Err((peer, e.into())),
-        };
+        let mut stream =
+            match timeout(Duration::from_secs(5), TcpStream::connect(&peer.addr())).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => return Err((peer, e.into())),
+                Err(_) => return Err((peer, anyhow!("connection timed out"))),
+            };
 
         let handshake = &Self::build_handshake(info_hash, peer_id);
         if let Err(e) = stream.write_all(handshake).await {
@@ -131,35 +138,46 @@ impl PeerConnection {
         handshake
     }
 
-    pub async fn read_loop(&mut self) -> Result<()> {
-        loop {
-            let mut len_buf = [0u8; 4];
-            self.stream.read_exact(&mut len_buf).await?;
-            let len = u32::from_be_bytes(len_buf);
+    pub async fn send_message(&mut self, message: Message) -> Result<()> {
+        Ok(self.stream.write_all(&message.encode()).await?)
+    }
 
-            if len == 0 {
-                println!("Message: Keep alive");
-                continue;
-            }
+    pub async fn read_message(&mut self) -> Result<Message> {
+        let mut len_buf = [0u8; 4];
+        self.stream.read_exact(&mut len_buf).await?;
+        let len = u32::from_be_bytes(len_buf);
 
-            let mut buf = vec![0u8; len.try_into().unwrap()];
-            self.stream.read_exact(&mut buf).await?;
-            let message = Message::decode(&buf)?;
-
-            match &message {
-                Message::Bitfield(bitfield) => {
-                    self.peer.bitfield = Some(BitField::new(bitfield.to_vec(), self.num_pieces));
-                }
-                _ => {}
-            }
-
-            println!("Message: {:?}", message);
+        if len == 0 {
+            return Ok(Message::KeepAlive);
         }
+
+        let mut buf = vec![0u8; len.try_into().unwrap()];
+        self.stream.read_exact(&mut buf).await?;
+        Message::decode(&buf)
+    }
+
+    pub async fn read_first_message(&mut self) -> Result<()> {
+        loop {
+            match self.read_message().await? {
+                Message::KeepAlive => continue,
+                Message::Unchoke => self.peer.chocked = false,
+                Message::Bitfield(b) => {
+                    self.peer.bitfield = Some(BitField::new(b.to_vec(), self.num_pieces));
+                }
+                _ => break,
+            }
+
+            if self.peer.has_bitfield() && !self.peer.chocked() {
+                break;
+            }
+        }
+
+        Ok(())
     }
 }
 
 #[derive(Debug)]
-enum Message {
+pub enum Message {
     KeepAlive,
     Choke,
     Unchoke,
