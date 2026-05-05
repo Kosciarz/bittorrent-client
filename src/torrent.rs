@@ -1,7 +1,8 @@
-use std::{collections::BTreeMap, fs, io, net::SocketAddr, path::Path};
+use std::{collections::BTreeMap, fs, io, net::SocketAddr, path::Path, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use sha1::{Digest, Sha1};
+use tokio::time::timeout;
 use url::Url;
 
 use crate::{
@@ -169,12 +170,17 @@ impl Torrent {
                 continue;
             }
 
-            if let Err(e) = self.download_from(&mut conn).await {
-                eprintln!("Failed to download: {e}");
-                continue;
+            match timeout(Duration::from_secs(30), self.download_from(&mut conn)).await {
+                Ok(Ok(())) => break,
+                Ok(Err(e)) => {
+                    eprintln!("Download failed: {e}");
+                    continue;
+                }
+                Err(_) => {
+                    eprintln!("Download timed out");
+                    continue;
+                }
             }
-
-            break;
         }
 
         Ok(())

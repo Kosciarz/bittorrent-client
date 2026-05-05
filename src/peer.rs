@@ -1,4 +1,7 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Result, anyhow};
 use tokio::{
@@ -249,6 +252,13 @@ impl PeerConnection {
                         );
                         break;
                     }
+                    Message::Choke => {
+                        self.peer.peer_choking = true;
+
+                        timeout(Duration::from_secs(30), self.wait_for_unchoke())
+                            .await
+                            .map_err(|_| anyhow!("Timed out waiting for unchoke"))??;
+                    }
                     Message::Unchoke => continue,
                     Message::KeepAlive => continue,
                     msg => return Err(anyhow!("unexpected message: {:?}", msg)),
@@ -257,6 +267,22 @@ impl PeerConnection {
         }
 
         Ok(piece_buf)
+    }
+
+    async fn wait_for_unchoke(&mut self) -> Result<()> {
+        loop {
+            match self.read_message().await? {
+                Message::Unchoke => {
+                    self.peer.peer_choking = false;
+                    return Ok(());
+                }
+                Message::KeepAlive => continue,
+                msg => {
+                    println!("Unexpected message while choked: {:?}", msg);
+                    continue;
+                }
+            }
+        }
     }
 }
 
