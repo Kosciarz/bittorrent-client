@@ -160,16 +160,19 @@ impl Torrent {
             };
 
             if let Err(e) = conn.receive_initial_messages().await {
-                println!("Failed initial messages: {e}");
+                eprintln!("Failed to receive initial messages: {e}");
                 continue;
             }
 
             if let Err(e) = conn.send_interested().await {
-                println!("Failed to send interested: {e}");
+                eprintln!("Failed to send interested: {e}");
                 continue;
             }
 
-            self.download_from(&mut conn).await?;
+            if let Err(e) = self.download_from(&mut conn).await {
+                eprintln!("Failed to download: {e}");
+                continue;
+            }
 
             break;
         }
@@ -185,7 +188,6 @@ impl Torrent {
 
             let data = conn.download_piece(piece_idx, self.piece_length).await?;
             self.verify_and_store(piece_idx, &data)?;
-            break;
         }
 
         Ok(())
