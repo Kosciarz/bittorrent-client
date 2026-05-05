@@ -10,9 +10,11 @@ use crate::{
         object::{extract_byte_array, extract_dict, extract_list, extract_num, extract_str},
     },
     client::Client,
-    peer::{Peer, PeerConnection},
+    peer::{BitField, Peer, PeerConnection},
     tracker::{AnnounceStats, Tracker},
 };
+
+pub const BLOCK_SIZE: u32 = 16_384;
 
 pub struct Torrent {
     tracker: Tracker,
@@ -32,6 +34,7 @@ pub struct Torrent {
     uploaded: u64,
 
     peers: Vec<Peer>,
+    have: Vec<bool>,
 }
 
 impl Torrent {
@@ -136,21 +139,73 @@ impl Torrent {
     }
 
     pub async fn connect_peers(&mut self, client: &Client) -> Result<()> {
-        for peer in self.peers.clone() {
+        let peers: Vec<Peer> = self.peers.drain(..).collect();
+
+        for peer in peers {
             println!("\nTrying peer {}", peer.addr());
 
-            match PeerConnection::connect(peer, &self.info_hash, &client.peer_id, self.pieces.len())
-                .await
+            let mut conn = match PeerConnection::connect(
+                peer,
+                &self.info_hash,
+                &client.peer_id,
+                self.pieces.len(),
+            )
+            .await
             {
-                Ok(mut conn) => {
-                    conn.read_first_message().await?;
-                    conn.send_interested().await?;
-                    break;
+                Ok(conn) => conn,
+                Err((peer, e)) => {
+                    eprintln!("Peer {} failed: {e}", peer.addr());
+                    continue;
                 }
-                Err((peer, e)) => println!("Peer {} failed: {e}", peer.addr()),
             };
+
+            if let Err(e) = conn.receive_initial_messages().await {
+                println!("Failed initial messages: {e}");
+                continue;
+            }
+
+            if let Err(e) = conn.send_interested().await {
+                println!("Failed to send interested: {e}");
+                continue;
+            }
+
+            self.download_from(&mut conn).await?;
+
+            break;
         }
 
+        Ok(())
+    }
+
+    pub async fn download_from(&mut self, conn: &mut PeerConnection) -> Result<()> {
+        loop {
+            let Some(piece_idx) = self.pick_piece(conn.peer().bitfield()) else {
+                break;
+            };
+
+            let data = conn.download_piece(piece_idx, self.piece_length).await?;
+            self.verify_and_store(piece_idx, &data)?;
+            break;
+        }
+
+        Ok(())
+    }
+
+    fn pick_piece(&self, bitfield: &BitField) -> Option<usize> {
+        (0..self.pieces.len()).find(|&piece| bitfield.has_piece(piece) && !self.have[piece])
+    }
+
+    fn verify_and_store(&mut self, piece_idx: usize, data: &[u8]) -> Result<()> {
+        let piece_hash: [u8; 20] = Sha1::digest(data).into();
+        if piece_hash != self.pieces[piece_idx] {
+            return Err(anyhow!("Piece {} hash mismatch", piece_idx));
+        }
+
+        self.have[piece_idx] = true;
+        self.downloaded += data.len() as u64;
+        self.left = self.left.saturating_sub(data.len() as u64);
+
+        println!("Verified piece {}", piece_idx);
         Ok(())
     }
 }
@@ -181,6 +236,7 @@ impl TryFrom<Object> for Torrent {
             .map_err(|_| anyhow!("piece length is negative or too large"))?;
         let pieces = extract_pieces(&info_obj)?;
         let info_hash = compute_info_hash(&dict)?;
+        let have = vec![false; pieces.len()];
 
         Ok(Torrent {
             tracker: announce,
@@ -197,6 +253,7 @@ impl TryFrom<Object> for Torrent {
             left: length,
             uploaded: 0,
             peers: Vec::new(),
+            have,
         })
     }
 }

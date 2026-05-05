@@ -7,6 +7,8 @@ use tokio::{
     time::timeout,
 };
 
+use crate::torrent::BLOCK_SIZE;
+
 const HANDSHAKE_SIZE: usize = 68;
 
 #[derive(Debug, Clone)]
@@ -20,6 +22,13 @@ impl BitField {
         Self { bytes, num_pieces }
     }
 
+    pub fn empty(num_pieces: usize) -> Self {
+        Self {
+            bytes: vec![0u8; (num_pieces + 7) / 8],
+            num_pieces,
+        }
+    }
+
     pub fn has_piece(&self, index: usize) -> bool {
         if index >= self.num_pieces {
             return false;
@@ -29,25 +38,38 @@ impl BitField {
         let bit = 7 - (index % 8);
         self.bytes[byte] & (1 << bit) != 0
     }
+
+    pub fn set_piece(&mut self, index: usize) {
+        if index >= self.num_pieces {
+            return;
+        }
+        let byte = index / 8;
+        let bit = 7 - (index % 8);
+        self.bytes[byte] |= 1 << bit;
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Peer {
     addr: SocketAddr,
-    bitfield: Option<BitField>,
     peer_id: [u8; 20],
-    chocked: bool,
-    interested: bool,
+    bitfield: BitField,
+    am_choking: bool,
+    am_interested: bool,
+    peer_choking: bool,
+    peer_interested: bool,
 }
 
 impl Peer {
     pub fn new(addr: SocketAddr) -> Self {
         Self {
             addr,
-            bitfield: None,
-            chocked: true,
-            interested: false,
             peer_id: [0u8; 20],
+            bitfield: BitField::empty(0),
+            am_choking: true,
+            am_interested: false,
+            peer_choking: true,
+            peer_interested: false,
         }
     }
 
@@ -55,20 +77,24 @@ impl Peer {
         self.addr
     }
 
-    pub fn chocked(&self) -> bool {
-        self.chocked
+    pub fn is_chocked(&self) -> bool {
+        self.peer_choking
     }
 
-    pub fn interested(&self) -> bool {
-        self.interested
+    pub fn is_interested(&self) -> bool {
+        self.peer_interested
+    }
+
+    pub fn bitfield(&self) -> &BitField {
+        &self.bitfield
+    }
+
+    fn bitfield_mut(&mut self) -> &mut BitField {
+        &mut self.bitfield
     }
 
     pub fn set_bitfield(&mut self, bitfield: BitField) {
-        self.bitfield = Some(bitfield);
-    }
-
-    pub fn has_bitfield(&self) -> bool {
-        self.bitfield.is_some()
+        self.bitfield = bitfield;
     }
 }
 
@@ -80,6 +106,10 @@ pub struct PeerConnection {
 }
 
 impl PeerConnection {
+    pub fn peer(&self) -> &Peer {
+        &self.peer
+    }
+
     pub async fn connect(
         mut peer: Peer,
         info_hash: &[u8; 20],
@@ -90,7 +120,7 @@ impl PeerConnection {
             match timeout(Duration::from_secs(5), TcpStream::connect(&peer.addr())).await {
                 Ok(Ok(s)) => s,
                 Ok(Err(e)) => return Err((peer, e.into())),
-                Err(_) => return Err((peer, anyhow!("connection timed out"))),
+                Err(_) => return Err((peer, anyhow!("Connection timed out"))),
             };
 
         let handshake = &Self::build_handshake(info_hash, peer_id);
@@ -116,6 +146,7 @@ impl PeerConnection {
         }
 
         peer.peer_id = buf[48..68].try_into().unwrap();
+        peer.set_bitfield(BitField::empty(num_pieces));
 
         println!("Connected to peer: {}", peer.addr());
 
@@ -156,23 +187,22 @@ impl PeerConnection {
         Message::decode(&buf)
     }
 
-    pub async fn read_first_message(&mut self) -> Result<()> {
+    pub async fn receive_initial_messages(&mut self) -> Result<()> {
         loop {
-            let message = self.read_message().await?;
-
-            match &message {
+            match self.read_message().await? {
                 Message::KeepAlive => continue,
-                Message::Unchoke => self.peer.chocked = false,
-                Message::Bitfield(b) => {
-                    self.peer.bitfield = Some(BitField::new(b.to_vec(), self.num_pieces));
+                Message::Unchoke => {
+                    self.peer.peer_choking = false;
+                    break;
                 }
-                _ => break,
-            }
-
-            println!("{:?}", message);
-
-            if self.peer.has_bitfield() && !self.peer.chocked() {
-                break;
+                Message::BitField(b) => {
+                    self.peer
+                        .set_bitfield(BitField::new(b.to_vec(), self.num_pieces));
+                }
+                // Message::Have(index) => {
+                //     self.peer.bitfield_mut().set_piece(index as usize);
+                // }
+                msg => return Err(anyhow!("Unexpected message: {:?}", msg)),
             }
         }
 
@@ -181,6 +211,52 @@ impl PeerConnection {
 
     pub async fn send_interested(&mut self) -> Result<()> {
         self.send_message(Message::Interested).await
+    }
+
+    pub async fn download_piece(
+        &mut self,
+        piece_index: usize,
+        piece_length: u64,
+    ) -> Result<Vec<u8>> {
+        let num_blocks = piece_length / BLOCK_SIZE as u64;
+        let mut piece_buf = vec![0u8; piece_length as usize];
+
+        for block in 0..num_blocks {
+            let begin = block as u32 * BLOCK_SIZE;
+            let length = BLOCK_SIZE.min(piece_length as u32 - begin);
+
+            self.send_message(Message::Request {
+                index: piece_index as u32,
+                begin,
+                length,
+            })
+            .await?;
+
+            loop {
+                match self.read_message().await? {
+                    Message::Piece {
+                        index,
+                        begin,
+                        block,
+                    } => {
+                        piece_buf[(begin as usize)..(begin as usize + block.len())]
+                            .copy_from_slice(&block);
+                        println!(
+                            "Read block {} offset {}: {} bytes",
+                            piece_index,
+                            begin,
+                            block.len()
+                        );
+                        break;
+                    }
+                    Message::Unchoke => continue,
+                    Message::KeepAlive => continue,
+                    msg => return Err(anyhow!("unexpected message: {:?}", msg)),
+                }
+            }
+        }
+
+        Ok(piece_buf)
     }
 }
 
@@ -192,7 +268,7 @@ pub enum Message {
     Interested,
     NotInterested,
     Have(u32),
-    Bitfield(Vec<u8>),
+    BitField(Vec<u8>),
     Request {
         index: u32,
         begin: u32,
@@ -219,7 +295,7 @@ impl Message {
             Message::Interested => Self::encode_state(2),
             Message::NotInterested => Self::encode_state(3),
             Message::Have(piece_index) => Self::encode_have(*piece_index),
-            Message::Bitfield(bitfield) => Self::encode_bitfield(bitfield),
+            Message::BitField(bitfield) => Self::encode_bitfield(bitfield),
             Message::Request {
                 index,
                 begin,
@@ -334,7 +410,7 @@ impl Message {
     }
 
     fn decode_bitfield(buf: &[u8]) -> Message {
-        Message::Bitfield(buf.to_vec())
+        Message::BitField(buf.to_vec())
     }
 
     fn decode_request(buf: &[u8]) -> Message {
