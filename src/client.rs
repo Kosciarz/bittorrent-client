@@ -1,9 +1,10 @@
-use std::{env, path::Path};
+use std::{env, path::Path, sync::Arc};
 
 use crate::torrent::Torrent;
 use anyhow::Result;
 use rand::RngExt;
 
+#[derive(Debug)]
 pub struct Client {
     pub peer_id: [u8; 20],
     pub port: u16,
@@ -25,9 +26,10 @@ impl Client {
 
         let path = args[1].to_string();
         let path = Path::new(&path);
+
         let mut torrent = Torrent::load_from_file(path)?;
         torrent.update_trackers(self).await?;
-        torrent.connect_peers(self).await?;
+        torrent.download(self).await?;
 
         Ok(())
     }

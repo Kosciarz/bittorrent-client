@@ -1,8 +1,17 @@
-use std::{collections::BTreeMap, fs, io, net::SocketAddr, path::Path, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fs, io,
+    net::SocketAddr,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use anyhow::{Context, Result, anyhow};
 use sha1::{Digest, Sha1};
-use tokio::time::timeout;
+use tokio::{sync::Mutex, task::JoinSet};
 use url::Url;
 
 use crate::{
@@ -17,25 +26,42 @@ use crate::{
 
 pub const BLOCK_SIZE: u32 = 16_384;
 
+#[derive(Debug, Clone, PartialEq)]
+enum PieceState {
+    Missing,
+    InProgress,
+    Verified,
+}
+
+#[derive(Debug, Clone)]
+struct Piece {
+    index: usize,
+    length: usize,
+    state: PieceState,
+}
+
+#[derive(Debug, Clone)]
 pub struct Torrent {
+    // core download fields
+    info_hash: [u8; 20],
+    piece_hashes: Vec<[u8; 20]>,
+    piece_length: u64,
+    length: u64,
+
+    // metadata (only for serialization/display)
+    name: String,
     tracker: Tracker,
     announce_list: Vec<Vec<Tracker>>,
     comment: String,
     created_by: String,
     creation_date: u64,
 
-    name: String,
-    length: u64,
-    piece_length: u64,
-    pieces: Vec<[u8; 20]>,
-    info_hash: [u8; 20],
-
-    downloaded: u64,
-    left: u64,
-    uploaded: u64,
-
-    peers: Vec<Peer>,
-    have: Vec<bool>,
+    // runtime state
+    downloaded: Arc<AtomicU64>,
+    left: Arc<AtomicU64>,
+    uploaded: Arc<AtomicU64>,
+    pieces: Arc<Mutex<Vec<Piece>>>,
+    peers: Arc<Mutex<Vec<Peer>>>,
 }
 
 impl Torrent {
@@ -71,24 +97,12 @@ impl Torrent {
         self.piece_length
     }
 
-    pub fn pieces(&self) -> &[[u8; 20]] {
-        &self.pieces
-    }
-
     pub fn info_hash(&self) -> &[u8; 20] {
         &self.info_hash
     }
 
-    pub fn downloaded(&self) -> u64 {
-        self.downloaded
-    }
-
-    pub fn left(&self) -> u64 {
-        self.left
-    }
-
-    pub fn uploaded(&self) -> u64 {
-        self.uploaded
+    pub fn piece_hashes(&self) -> &Vec<[u8; 20]> {
+        &self.piece_hashes
     }
 
     pub fn load_from_file(path: &Path) -> Result<Torrent> {
@@ -97,14 +111,14 @@ impl Torrent {
         Torrent::try_from(obj)
     }
 
-    pub fn save_to_file(torrent: &Torrent, path: &Path) -> io::Result<()> {
-        let obj = Object::from(torrent);
+    pub fn save_to_file(&self, path: &Path) -> io::Result<()> {
+        let obj = Object::from_torrent(self);
         let bytes = bencode::encode_object(&obj);
         fs::write(
             format!(
                 "{}/{}.torrent",
                 path.to_string_lossy().to_string(),
-                torrent.name()
+                self.name
             ),
             bytes,
         )?;
@@ -119,99 +133,115 @@ impl Torrent {
                 &client.peer_id,
                 client.port,
                 &AnnounceStats {
-                    uploaded: self.uploaded,
-                    downloaded: self.downloaded,
-                    left: self.left,
+                    uploaded: self.uploaded.load(Ordering::Relaxed),
+                    downloaded: self.downloaded.load(Ordering::Relaxed),
+                    left: self.left.load(Ordering::Relaxed),
                 },
             )
             .await?;
 
-        self.add_peers(addrs);
+        self.add_peers(addrs).await;
 
         Ok(())
     }
 
-    pub fn add_peers(&mut self, addrs: Vec<SocketAddr>) {
+    async fn add_peers(&self, addrs: Vec<SocketAddr>) {
+        let mut peers = self.peers.lock().await;
         for addr in addrs {
-            if !self.peers.iter().any(|p| p.addr() == addr) {
-                self.peers.push(Peer::new(addr));
+            if !peers.iter().any(|p| p.addr() == addr) {
+                peers.push(Peer::new(addr));
             }
         }
     }
 
-    pub async fn connect_peers(&mut self, client: &Client) -> Result<()> {
-        let peers: Vec<Peer> = self.peers.drain(..).collect();
+    pub async fn download(&self, client: &Client) -> Result<()> {
+        let peers: Vec<Peer> = self.peers.lock().await.drain(..).collect();
+
+        let info_hash = self.info_hash;
+        let peer_id = client.peer_id;
+        let num_pieces = self.piece_hashes.len();
+
+        let mut set = JoinSet::new();
 
         for peer in peers {
             println!("\nTrying peer {}", peer.addr());
+            let mut torrent = self.clone();
 
-            let mut conn = match PeerConnection::connect(
-                peer,
-                &self.info_hash,
-                &client.peer_id,
-                self.pieces.len(),
-            )
-            .await
-            {
-                Ok(conn) => conn,
-                Err((peer, e)) => {
-                    eprintln!("Peer {} failed: {e}", peer.addr());
-                    continue;
+            set.spawn({
+                async move {
+                    let mut conn =
+                        match PeerConnection::connect(peer, &info_hash, &peer_id, num_pieces).await
+                        {
+                            Ok(conn) => conn,
+                            Err((peer, e)) => {
+                                eprintln!("Peer {} failed: {e}", peer.addr());
+                                return;
+                            }
+                        };
+
+                    if let Err(e) = conn.receive_initial_messages().await {
+                        eprintln!("Failed to receive initial messages: {e}");
+                        return;
+                    }
+
+                    if let Err(e) = conn.send_interested().await {
+                        eprintln!("Failed to send interested: {e}");
+                        return;
+                    }
+
+                    match torrent.download_from(&mut conn).await {
+                        Ok(_) => return,
+                        Err(e) => {
+                            eprintln!("Download failed: {e}");
+                            return;
+                        }
+                    }
                 }
-            };
-
-            if let Err(e) = conn.receive_initial_messages().await {
-                eprintln!("Failed to receive initial messages: {e}");
-                continue;
-            }
-
-            if let Err(e) = conn.send_interested().await {
-                eprintln!("Failed to send interested: {e}");
-                continue;
-            }
-
-            match timeout(Duration::from_secs(30), self.download_from(&mut conn)).await {
-                Ok(Ok(())) => break,
-                Ok(Err(e)) => {
-                    eprintln!("Download failed: {e}");
-                    continue;
-                }
-                Err(_) => {
-                    eprintln!("Download timed out");
-                    continue;
-                }
-            }
+            });
         }
+
+        while let Some(_) = set.join_next().await {}
 
         Ok(())
     }
 
-    pub async fn download_from(&mut self, conn: &mut PeerConnection) -> Result<()> {
+    async fn download_from(&mut self, conn: &mut PeerConnection) -> Result<()> {
         loop {
-            let Some(piece_idx) = self.pick_piece(conn.peer().bitfield()) else {
+            let Some(piece_idx) = self.pick_piece(conn.peer().bitfield()).await else {
                 break;
             };
 
             let data = conn.download_piece(piece_idx, self.piece_length).await?;
-            self.verify_and_store(piece_idx, &data)?;
+            self.verify_and_store(piece_idx, &data).await?;
         }
 
         Ok(())
     }
 
-    fn pick_piece(&self, bitfield: &BitField) -> Option<usize> {
-        (0..self.pieces.len()).find(|&piece| bitfield.has_piece(piece) && !self.have[piece])
+    async fn pick_piece(&self, bitfield: &BitField) -> Option<usize> {
+        let mut pieces = self.pieces.lock().await;
+        let idx = (0..pieces.len()).find(|&piece| {
+            bitfield.has_piece(piece) && pieces[piece].state == PieceState::Missing
+        })?;
+        pieces[idx].state = PieceState::InProgress;
+        Some(idx)
     }
 
-    fn verify_and_store(&mut self, piece_idx: usize, data: &[u8]) -> Result<()> {
+    async fn verify_and_store(&self, piece_idx: usize, data: &[u8]) -> Result<()> {
         let piece_hash: [u8; 20] = Sha1::digest(data).into();
-        if piece_hash != self.pieces[piece_idx] {
-            return Err(anyhow!("Piece {} hash mismatch", piece_idx));
+        {
+            let mut pieces = self.pieces.lock().await;
+            if piece_hash != self.piece_hashes[piece_idx] {
+                pieces[piece_idx].state = PieceState::Missing;
+                return Err(anyhow!("Piece {} hash mismatch", piece_idx));
+            }
+
+            pieces[piece_idx].state = PieceState::Verified;
         }
 
-        self.have[piece_idx] = true;
-        self.downloaded += data.len() as u64;
-        self.left = self.left.saturating_sub(data.len() as u64);
+        self.downloaded
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
+        self.left.fetch_sub(data.len() as u64, Ordering::Relaxed);
 
         println!("Verified piece {}", piece_idx);
         Ok(())
@@ -238,30 +268,50 @@ impl TryFrom<Object> for Torrent {
 
         let info_obj = extract_dict(&dict, b"info")?;
         let name = extract_str(&info_obj, b"name")?;
-        let length = u64::try_from(extract_num(&info_obj, b"length")?)
+        let total_length = u64::try_from(extract_num(&info_obj, b"length")?)
             .map_err(|_| anyhow!("length is negative or too large"))?;
         let piece_length = u64::try_from(extract_num(&info_obj, b"piece length")?)
             .map_err(|_| anyhow!("piece length is negative or too large"))?;
-        let pieces = extract_pieces(&info_obj)?;
+        let piece_hashes = extract_pieces(&info_obj)?;
+
+        let mut pieces = Vec::with_capacity(piece_hashes.len());
+        for i in 0..piece_hashes.len() {
+            let length = if i == piece_hashes.len() - 1 {
+                let last_piece_length = total_length - (piece_length * (i as u64));
+                assert!(
+                    last_piece_length > 0 && last_piece_length <= piece_length,
+                    "last piece length {last_piece_length} is out of range"
+                );
+                last_piece_length
+            } else {
+                piece_length
+            };
+
+            pieces.push(Piece {
+                index: i,
+                length: length as usize,
+                state: PieceState::Missing,
+            });
+        }
+
         let info_hash = compute_info_hash(&dict)?;
-        let have = vec![false; pieces.len()];
 
         Ok(Torrent {
+            info_hash,
+            piece_hashes,
+            piece_length,
+            length: total_length,
+            name,
             tracker: announce,
             announce_list,
             comment,
             created_by,
             creation_date,
-            name,
-            length,
-            piece_length,
-            pieces,
-            info_hash,
-            downloaded: 0,
-            left: length,
-            uploaded: 0,
-            peers: Vec::new(),
-            have,
+            downloaded: Arc::new(0.into()),
+            left: Arc::new(total_length.into()),
+            uploaded: Arc::new(0.into()),
+            pieces: Arc::new(Mutex::new(pieces)),
+            peers: Arc::new(Mutex::new(Vec::new())),
         })
     }
 }

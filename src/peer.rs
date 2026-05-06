@@ -1,7 +1,4 @@
-use std::{
-    net::SocketAddr,
-    time::{Duration, Instant},
-};
+use std::{net::SocketAddr, time::Duration};
 
 use anyhow::{Result, anyhow};
 use tokio::{
@@ -191,21 +188,29 @@ impl PeerConnection {
     }
 
     pub async fn receive_initial_messages(&mut self) -> Result<()> {
+        let mut got_bitfield = false;
+
         loop {
             match self.read_message().await? {
-                Message::KeepAlive => continue,
-                Message::Unchoke => {
-                    self.peer.peer_choking = false;
-                    break;
-                }
                 Message::BitField(b) => {
                     self.peer
                         .set_bitfield(BitField::new(b.to_vec(), self.num_pieces));
+                    got_bitfield = true;
                 }
-                // Message::Have(index) => {
-                //     self.peer.bitfield_mut().set_piece(index as usize);
-                // }
-                msg => return Err(anyhow!("Unexpected message: {:?}", msg)),
+                Message::Have(index) => {
+                    self.peer.bitfield_mut().set_piece(index as usize);
+                }
+                Message::Unchoke => self.peer.peer_choking = false,
+                Message::Choke => self.peer.peer_choking = true,
+                Message::KeepAlive => continue,
+                msg => {
+                    println!("Ignoring message during init: {:?}", msg);
+                    continue;
+                }
+            }
+
+            if got_bitfield {
+                break;
             }
         }
 
@@ -221,7 +226,7 @@ impl PeerConnection {
         piece_index: usize,
         piece_length: u64,
     ) -> Result<Vec<u8>> {
-        let num_blocks = piece_length / BLOCK_SIZE as u64;
+        let num_blocks = (piece_length + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64;
         let mut piece_buf = vec![0u8; piece_length as usize];
 
         for block in 0..num_blocks {
@@ -255,9 +260,9 @@ impl PeerConnection {
                     Message::Choke => {
                         self.peer.peer_choking = true;
 
-                        timeout(Duration::from_secs(30), self.wait_for_unchoke())
+                        self.wait_for_unchoke()
                             .await
-                            .map_err(|_| anyhow!("Timed out waiting for unchoke"))??;
+                            .map_err(|_| anyhow!("Timed out waiting for unchoke"))?;
                     }
                     Message::Unchoke => continue,
                     Message::KeepAlive => continue,

@@ -18,6 +18,7 @@ pub struct AnnounceStats {
     pub left: u64,
 }
 
+#[derive(Debug, Clone)]
 pub struct Tracker {
     url: Url,
     interval: Duration,
@@ -102,13 +103,5 @@ impl Tracker {
                 SocketAddr::from((ip, port))
             })
             .collect()
-    }
-}
-
-impl std::fmt::Debug for Tracker {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Tracker")
-            .field("address", &self.url)
-            .finish()
     }
 }

@@ -32,8 +32,8 @@ impl Object {
     }
 }
 
-impl From<&Torrent> for Object {
-    fn from(torrent: &Torrent) -> Self {
+impl Object {
+    pub fn from_torrent(torrent: &Torrent) -> Self {
         let mut dict = BTreeMap::new();
 
         dict.insert(
@@ -119,14 +119,14 @@ fn convert_info_dictionary(torrent: &Torrent) -> ObjectType {
         ),
     );
 
-    let mut pieces: Vec<u8> = Vec::with_capacity(torrent.pieces().len() * 20);
-    for piece in torrent.pieces() {
-        pieces.extend_from_slice(piece);
+    let mut piece_hashes_bytes: Vec<u8> = Vec::with_capacity(torrent.piece_hashes().len() * 20);
+    for piece_hash in torrent.piece_hashes() {
+        piece_hashes_bytes.extend_from_slice(piece_hash);
     }
 
     dict.insert(
         b"pieces".to_vec(),
-        Object::new(ObjectType::ByteArray(pieces), Vec::new()),
+        Object::new(ObjectType::ByteArray(piece_hashes_bytes), Vec::new()),
     );
 
     ObjectType::Dictionary(dict)
