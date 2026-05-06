@@ -1,7 +1,7 @@
-use std::{env, path::Path, sync::Arc, time::Duration};
+use std::{env, path::Path};
 
 use crate::torrent::Torrent;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use rand::RngExt;
 
 #[derive(Debug, Clone)]
@@ -30,6 +30,10 @@ impl Client {
         let torrent = Torrent::load_from_file(path).await?;
         torrent.update_trackers(self).await?;
         torrent.download(self).await?;
+
+        if !torrent.is_completed().await {
+            return Err(anyhow!("Failed to download"));
+        }
 
         println!("Download completed");
         Ok(())

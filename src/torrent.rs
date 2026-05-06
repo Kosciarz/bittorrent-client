@@ -33,17 +33,18 @@ use crate::{
 pub const BLOCK_SIZE: u32 = 16_384;
 
 #[derive(Debug, Clone, PartialEq)]
-enum PieceState {
+pub enum PieceState {
     Missing,
     InProgress,
+    Downloaded { data: Vec<u8> },
     Done,
 }
 
 #[derive(Debug, Clone)]
-struct Piece {
-    index: usize,
-    length: usize,
-    state: PieceState,
+pub struct Piece {
+    pub index: usize,
+    pub length: usize,
+    pub state: PieceState,
 }
 
 #[derive(Debug, Clone)]
@@ -181,34 +182,31 @@ impl Torrent {
             println!("\nTrying peer {}", peer.addr());
             let mut torrent = self.clone();
 
-            set.spawn({
-                async move {
-                    let mut conn =
-                        match PeerConnection::connect(peer, &info_hash, &peer_id, num_pieces).await
-                        {
-                            Ok(conn) => conn,
-                            Err((peer, e)) => {
-                                eprintln!("Peer {} failed: {e}", peer.addr());
-                                return;
-                            }
-                        };
-
-                    if let Err(e) = conn.wait_until_ready().await {
-                        eprintln!("Failed to receive initial messages: {e}");
-                        return;
-                    }
-
-                    if let Err(e) = conn.send_interested().await {
-                        eprintln!("Failed to send interested: {e}");
-                        return;
-                    }
-
-                    match torrent.download_from(&mut conn).await {
-                        Ok(_) => return,
-                        Err(e) => {
-                            eprintln!("Download failed: {e}");
+            set.spawn(async move {
+                let mut conn =
+                    match PeerConnection::connect(peer, &info_hash, &peer_id, num_pieces).await {
+                        Ok(conn) => conn,
+                        Err((peer, e)) => {
+                            eprintln!("Peer {} failed: {e}", peer.addr());
                             return;
                         }
+                    };
+
+                if let Err(e) = conn.wait_until_ready().await {
+                    eprintln!("Failed to receive initial messages: {e}");
+                    return;
+                }
+
+                if let Err(e) = conn.send_interested().await {
+                    eprintln!("Failed to send interested: {e}");
+                    return;
+                }
+
+                match torrent.download_from(&mut conn).await {
+                    Ok(_) => return,
+                    Err(e) => {
+                        eprintln!("Download failed: {e}");
+                        return;
                     }
                 }
             });
@@ -239,13 +237,13 @@ impl Torrent {
                 pieces[piece_idx].length as u64
             };
 
-            let data = match tokio::time::timeout(
+            let piece = match tokio::time::timeout(
                 Duration::from_mins(3),
                 conn.download_piece(piece_idx, piece_len),
             )
             .await
             {
-                Ok(Ok(d)) => d,
+                Ok(Ok(p)) => p,
                 Ok(Err(e)) => {
                     let mut pieces = self.pieces.lock().await;
                     pieces[piece_idx].state = PieceState::Missing;
@@ -258,7 +256,7 @@ impl Torrent {
                 }
             };
 
-            self.verify_and_store_piece(piece_idx, &data).await?;
+            self.verify_and_store_piece(piece).await?;
         }
 
         Ok(())
@@ -273,32 +271,36 @@ impl Torrent {
         Some(idx)
     }
 
-    async fn verify_and_store_piece(&self, piece_idx: usize, data: &[u8]) -> Result<()> {
-        let piece_hash: [u8; 20] = Sha1::digest(data).into();
-        {
-            let mut pieces = self.pieces.lock().await;
-            if piece_hash != self.piece_hashes[piece_idx] {
-                pieces[piece_idx].state = PieceState::Missing;
-                return Err(anyhow!("Piece {} hash mismatch", piece_idx));
-            }
+    async fn verify_and_store_piece(&self, mut piece: Piece) -> Result<()> {
+        let data = match piece.state {
+            PieceState::Downloaded { data } => data,
+            _ => unreachable!("piece must be in Downloaded state here"),
+        };
+
+        let piece_hash: [u8; 20] = Sha1::digest(&data).into();
+        let mut pieces = self.pieces.lock().await;
+        if piece_hash != self.piece_hashes[piece.index] {
+            pieces[piece.index].state = PieceState::Missing;
+            return Err(anyhow!("Piece {} hash mismatch", piece.index));
         }
 
         {
             let mut file = self.file.lock().await;
-            file.seek(io::SeekFrom::Start(piece_idx as u64 * self.piece_length))
+            file.seek(io::SeekFrom::Start(piece.index as u64 * self.piece_length))
                 .await?;
-            file.write_all(data).await?;
+            file.write_all(&data).await?;
             file.flush().await?;
         }
 
         self.downloaded
-            .fetch_add(data.len() as u64, Ordering::Relaxed);
-        self.left.fetch_sub(data.len() as u64, Ordering::Relaxed);
+            .fetch_add(piece.length as u64, Ordering::Relaxed);
+        self.left.fetch_sub(piece.length as u64, Ordering::Relaxed);
 
-        let mut pieces = self.pieces.lock().await;
-        pieces[piece_idx].state = PieceState::Done;
+        piece.state = PieceState::Done;
+        pieces[piece.index] = piece.clone();
 
-        println!("Downloaded piece {}", piece_idx);
+        println!("Downloaded piece {}", piece.index);
+
         Ok(())
     }
 

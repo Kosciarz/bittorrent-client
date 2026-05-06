@@ -7,7 +7,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::torrent::BLOCK_SIZE;
+use crate::torrent::{BLOCK_SIZE, Piece, PieceState};
 
 const HANDSHAKE_SIZE: usize = 68;
 
@@ -221,11 +221,7 @@ impl PeerConnection {
         self.send_message(Message::Interested).await
     }
 
-    pub async fn download_piece(
-        &mut self,
-        piece_index: usize,
-        piece_length: u64,
-    ) -> Result<Vec<u8>> {
+    pub async fn download_piece(&mut self, piece_index: usize, piece_length: u64) -> Result<Piece> {
         let num_blocks = (piece_length + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64;
         let mut piece_buf = vec![0u8; piece_length as usize];
         let mut blocks_received = 0;
@@ -264,7 +260,11 @@ impl PeerConnection {
             }
         }
 
-        Ok(piece_buf)
+        Ok(Piece {
+            index: piece_index,
+            length: piece_length as usize,
+            state: PieceState::Downloaded { data: piece_buf },
+        })
     }
 }
 
