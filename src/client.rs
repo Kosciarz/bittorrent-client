@@ -28,7 +28,6 @@ impl Client {
         let path = Path::new(&path);
 
         let torrent = Torrent::load_from_file(path).await?;
-        torrent.update_trackers(self).await?;
         torrent.download(self).await?;
 
         if !torrent.is_completed().await {

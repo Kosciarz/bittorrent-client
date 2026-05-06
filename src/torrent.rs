@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs, io,
     net::SocketAddr,
     path::Path,
@@ -17,7 +17,8 @@ use tokio::{
     io::{AsyncSeekExt, AsyncWriteExt},
     sync::{
         Mutex,
-        mpsc::{self, Sender},
+        mpsc::{self},
+        oneshot,
     },
     task::JoinSet,
 };
@@ -72,7 +73,7 @@ pub struct Torrent {
     uploaded: Arc<AtomicU64>,
     pieces: Arc<Mutex<Vec<Piece>>>,
     peers: Arc<Mutex<Vec<Peer>>>,
-    file_tx: Sender<Piece>,
+    file_tx: mpsc::Sender<Piece>,
 }
 
 impl Torrent {
@@ -145,84 +146,97 @@ impl Torrent {
         Ok(())
     }
 
-    pub async fn update_trackers(&self, client: &Client) -> Result<()> {
-        let addrs = self
-            .tracker
-            .announce(
-                &self.info_hash,
-                &client.peer_id,
-                client.port,
-                &AnnounceStats {
-                    uploaded: self.uploaded.load(Ordering::Relaxed),
-                    downloaded: self.downloaded.load(Ordering::Relaxed),
-                    left: self.left.load(Ordering::Relaxed),
-                },
-            )
-            .await?;
-
-        self.add_peers(addrs).await;
-
-        Ok(())
-    }
-
-    async fn add_peers(&self, addrs: Vec<SocketAddr>) {
-        let mut peers = self.peers.lock().await;
-        for addr in addrs {
-            if !peers.iter().any(|p| p.addr() == addr) {
-                peers.push(Peer::new(addr));
-            }
-        }
-    }
-
     pub async fn download(&self, client: &Client) -> Result<()> {
         let info_hash = self.info_hash;
         let peer_id = client.peer_id;
         let num_pieces = self.piece_hashes.len();
 
-        let mut set = JoinSet::new();
+        let (peer_tx, mut peer_rx) = mpsc::channel::<Vec<Peer>>(1);
+        
+        let announce_task = tokio::spawn({
+            let torrent = self.clone();
+            let client = client.clone();
 
-        for peer in self.peers.lock().await.drain(..).collect::<Vec<Peer>>() {
-            set.spawn({
-                let mut torrent = self.clone();
+            async move {
+                loop {
+                    if torrent.announce().is_due() {
+                        let addrs = torrent
+                            .tracker
+                            .announce(
+                                &torrent.info_hash,
+                                &client.peer_id,
+                                client.port,
+                                &AnnounceStats {
+                                    uploaded: torrent.uploaded.load(Ordering::Relaxed),
+                                    downloaded: torrent.downloaded.load(Ordering::Relaxed),
+                                    left: torrent.left.load(Ordering::Relaxed),
+                                },
+                            )
+                            .await?;
 
-                async move {
-                    let mut conn =
-                        match PeerConnection::connect(peer, &info_hash, &peer_id, num_pieces).await
-                        {
-                            Ok(conn) => conn,
-                            Err((peer, e)) => {
-                                eprintln!("Peer {} failed: {e}", peer.addr());
+                        let peers = addrs.into_iter().map(|addr| Peer::new(addr)).collect();
+                        peer_tx.send(peers).await?;
+                    }
+
+                    tokio::time::sleep(torrent.announce().interval()).await;
+                }
+
+                Ok::<(), anyhow::Error>(())
+            }
+        });
+
+        let download_task = tokio::spawn({
+            let torrent = self.clone();
+
+            async move {
+                let mut set = JoinSet::new();
+
+                while let Some(peers) = peer_rx.recv().await {
+                    for peer in peers {
+                        let mut torrent = torrent.clone();
+
+                        set.spawn(async move {
+                            let mut conn = match PeerConnection::connect(
+                                peer, &info_hash, &peer_id, num_pieces,
+                            )
+                            .await
+                            {
+                                Ok(conn) => conn,
+                                Err((peer, e)) => {
+                                    eprintln!("Peer {} failed: {e}", peer.addr());
+                                    return;
+                                }
+                            };
+
+                            if let Err(e) = conn.wait_until_ready().await {
+                                eprintln!("Failed to receive initial messages: {e}");
                                 return;
                             }
-                        };
 
-                    if let Err(e) = conn.wait_until_ready().await {
-                        eprintln!("Failed to receive initial messages: {e}");
-                        return;
-                    }
+                            if let Err(e) = conn.send_interested().await {
+                                eprintln!("Failed to send interested: {e}");
+                                return;
+                            }
 
-                    if let Err(e) = conn.send_interested().await {
-                        eprintln!("Failed to send interested: {e}");
-                        return;
-                    }
-
-                    match torrent.download_from(&mut conn).await {
-                        Ok(_) => return,
-                        Err(e) => {
-                            eprintln!("Download failed: {e}");
-                            return;
-                        }
+                            match torrent.download_from(&mut conn).await {
+                                Ok(_) => return,
+                                Err(e) => {
+                                    eprintln!("Download failed: {e}");
+                                    return;
+                                }
+                            }
+                        });
                     }
                 }
-            });
-        }
 
-        while let Some(_) = set.join_next().await {
-            if self.is_completed().await {
-                set.abort_all();
-                return Ok(());
+                while let Some(_) = set.join_next().await {}
             }
-        }
+        });
+
+        let (announce_result, download_result) = tokio::join!(announce_task, download_task);
+
+        announce_result??;
+        download_result?;
 
         Ok(())
     }
@@ -344,8 +358,8 @@ impl Torrent {
 
         let info_hash = compute_info_hash(&dict)?;
 
-        let (tx, rx) = mpsc::channel::<Piece>(32);
-        tokio::spawn(Self::disk_writer_task(total_length, rx, name.clone()));
+        let (file_tx, file_rx) = mpsc::channel::<Piece>(32);
+        tokio::spawn(Self::disk_writer_task(total_length, file_rx, name.clone()));
 
         Ok(Torrent {
             info_hash,
@@ -363,7 +377,7 @@ impl Torrent {
             uploaded: Arc::new(0.into()),
             pieces: Arc::new(Mutex::new(pieces)),
             peers: Arc::new(Mutex::new(Vec::new())),
-            file_tx: tx,
+            file_tx,
         })
     }
 
