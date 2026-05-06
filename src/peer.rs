@@ -187,34 +187,34 @@ impl PeerConnection {
         Message::decode(&buf)
     }
 
-    pub async fn receive_initial_messages(&mut self) -> Result<()> {
+    pub async fn wait_until_ready(&mut self) -> Result<()> {
         let mut got_bitfield = false;
 
         loop {
             match self.read_message().await? {
                 Message::BitField(b) => {
-                    self.peer
-                        .set_bitfield(BitField::new(b.to_vec(), self.num_pieces));
+                    self.peer.set_bitfield(BitField::new(b, self.num_pieces));
                     got_bitfield = true;
                 }
                 Message::Have(index) => {
                     self.peer.bitfield_mut().set_piece(index as usize);
                 }
-                Message::Unchoke => self.peer.peer_choking = false,
-                Message::Choke => self.peer.peer_choking = true,
+                Message::Unchoke => {
+                    self.peer.peer_choking = false;
+                }
+                Message::Choke => {
+                    self.peer.peer_choking = true;
+                }
                 Message::KeepAlive => continue,
                 msg => {
-                    println!("Ignoring message during init: {:?}", msg);
-                    continue;
+                    println!("Ignoring during init: {:?}", msg);
                 }
             }
 
-            if got_bitfield {
-                break;
+            if got_bitfield && !self.peer.is_chocked() {
+                return Ok(());
             }
         }
-
-        Ok(())
     }
 
     pub async fn send_interested(&mut self) -> Result<()> {
@@ -228,6 +228,7 @@ impl PeerConnection {
     ) -> Result<Vec<u8>> {
         let num_blocks = (piece_length + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64;
         let mut piece_buf = vec![0u8; piece_length as usize];
+        let mut blocks_received = 0;
 
         for block in 0..num_blocks {
             let begin = block as u32 * BLOCK_SIZE;
@@ -239,55 +240,31 @@ impl PeerConnection {
                 length,
             })
             .await?;
+        }
 
-            loop {
-                match self.read_message().await? {
-                    Message::Piece {
-                        index,
-                        begin,
-                        block,
-                    } => {
-                        piece_buf[(begin as usize)..(begin as usize + block.len())]
-                            .copy_from_slice(&block);
-                        println!(
-                            "Read block {} offset {}: {} bytes",
-                            piece_index,
-                            begin,
-                            block.len()
-                        );
-                        break;
+        while blocks_received < num_blocks {
+            match self.read_message().await? {
+                Message::Piece {
+                    index,
+                    begin,
+                    block,
+                } => {
+                    if index as usize != piece_index {
+                        return Err(anyhow!("Received block for wrong piece"));
                     }
-                    Message::Choke => {
-                        self.peer.peer_choking = true;
 
-                        self.wait_for_unchoke()
-                            .await
-                            .map_err(|_| anyhow!("Timed out waiting for unchoke"))?;
-                    }
-                    Message::Unchoke => continue,
-                    Message::KeepAlive => continue,
-                    msg => return Err(anyhow!("unexpected message: {:?}", msg)),
+                    piece_buf[(begin as usize)..(begin as usize + block.len())]
+                        .copy_from_slice(&block);
+                    blocks_received += 1;
                 }
+                Message::Choke => return Err(anyhow!("Peer choked during download")),
+                Message::Unchoke => continue,
+                Message::KeepAlive => continue,
+                msg => return Err(anyhow!("unexpected message: {:?}", msg)),
             }
         }
 
         Ok(piece_buf)
-    }
-
-    async fn wait_for_unchoke(&mut self) -> Result<()> {
-        loop {
-            match self.read_message().await? {
-                Message::Unchoke => {
-                    self.peer.peer_choking = false;
-                    return Ok(());
-                }
-                Message::KeepAlive => continue,
-                msg => {
-                    println!("Unexpected message while choked: {:?}", msg);
-                    continue;
-                }
-            }
-        }
     }
 }
 
