@@ -116,6 +116,8 @@ impl PeerConnection {
         peer_id: &[u8; 20],
         num_pieces: usize,
     ) -> Result<Self, (Peer, anyhow::Error)> {
+        println!("\nTrying peer {}", peer.addr());
+
         let mut stream =
             match timeout(Duration::from_secs(5), TcpStream::connect(&peer.addr())).await {
                 Ok(Ok(s)) => s,

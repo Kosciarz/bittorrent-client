@@ -15,7 +15,10 @@ use sha1::{Digest, Sha1};
 use tokio::{
     fs::File,
     io::{AsyncSeekExt, AsyncWriteExt},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        mpsc::{self, Sender},
+    },
     task::JoinSet,
 };
 use url::Url;
@@ -69,7 +72,7 @@ pub struct Torrent {
     uploaded: Arc<AtomicU64>,
     pieces: Arc<Mutex<Vec<Piece>>>,
     peers: Arc<Mutex<Vec<Peer>>>,
-    file: Arc<Mutex<File>>,
+    file_tx: Sender<Piece>,
 }
 
 impl Torrent {
@@ -178,35 +181,37 @@ impl Torrent {
 
         let mut set = JoinSet::new();
 
-        for peer in self.drain_available_peers().await {
-            println!("\nTrying peer {}", peer.addr());
-            let mut torrent = self.clone();
+        for peer in self.peers.lock().await.drain(..).collect::<Vec<Peer>>() {
+            set.spawn({
+                let mut torrent = self.clone();
 
-            set.spawn(async move {
-                let mut conn =
-                    match PeerConnection::connect(peer, &info_hash, &peer_id, num_pieces).await {
-                        Ok(conn) => conn,
-                        Err((peer, e)) => {
-                            eprintln!("Peer {} failed: {e}", peer.addr());
+                async move {
+                    let mut conn =
+                        match PeerConnection::connect(peer, &info_hash, &peer_id, num_pieces).await
+                        {
+                            Ok(conn) => conn,
+                            Err((peer, e)) => {
+                                eprintln!("Peer {} failed: {e}", peer.addr());
+                                return;
+                            }
+                        };
+
+                    if let Err(e) = conn.wait_until_ready().await {
+                        eprintln!("Failed to receive initial messages: {e}");
+                        return;
+                    }
+
+                    if let Err(e) = conn.send_interested().await {
+                        eprintln!("Failed to send interested: {e}");
+                        return;
+                    }
+
+                    match torrent.download_from(&mut conn).await {
+                        Ok(_) => return,
+                        Err(e) => {
+                            eprintln!("Download failed: {e}");
                             return;
                         }
-                    };
-
-                if let Err(e) = conn.wait_until_ready().await {
-                    eprintln!("Failed to receive initial messages: {e}");
-                    return;
-                }
-
-                if let Err(e) = conn.send_interested().await {
-                    eprintln!("Failed to send interested: {e}");
-                    return;
-                }
-
-                match torrent.download_from(&mut conn).await {
-                    Ok(_) => return,
-                    Err(e) => {
-                        eprintln!("Download failed: {e}");
-                        return;
                     }
                 }
             });
@@ -220,10 +225,6 @@ impl Torrent {
         }
 
         Ok(())
-    }
-
-    async fn drain_available_peers(&self) -> Vec<Peer> {
-        self.peers.lock().await.drain(..).collect()
     }
 
     async fn download_from(&mut self, conn: &mut PeerConnection) -> Result<()> {
@@ -272,7 +273,7 @@ impl Torrent {
     }
 
     async fn verify_and_store_piece(&self, mut piece: Piece) -> Result<()> {
-        let data = match piece.state {
+        let data = match &piece.state {
             PieceState::Downloaded { data } => data,
             _ => unreachable!("piece must be in Downloaded state here"),
         };
@@ -284,17 +285,11 @@ impl Torrent {
             return Err(anyhow!("Piece {} hash mismatch", piece.index));
         }
 
-        {
-            let mut file = self.file.lock().await;
-            file.seek(io::SeekFrom::Start(piece.index as u64 * self.piece_length))
-                .await?;
-            file.write_all(&data).await?;
-            file.flush().await?;
-        }
-
         self.downloaded
             .fetch_add(piece.length as u64, Ordering::Relaxed);
         self.left.fetch_sub(piece.length as u64, Ordering::Relaxed);
+
+        self.file_tx.send(piece.clone()).await?;
 
         piece.state = PieceState::Done;
         pieces[piece.index] = piece.clone();
@@ -347,15 +342,10 @@ impl Torrent {
             });
         }
 
-        let file = File::options()
-            .create(true)
-            .write(true)
-            .read(true)
-            .open(&name)
-            .await?;
-        file.set_len(total_length).await?;
-
         let info_hash = compute_info_hash(&dict)?;
+
+        let (tx, rx) = mpsc::channel::<Piece>(32);
+        tokio::spawn(Self::disk_writer_task(total_length, rx, name.clone()));
 
         Ok(Torrent {
             info_hash,
@@ -373,8 +363,40 @@ impl Torrent {
             uploaded: Arc::new(0.into()),
             pieces: Arc::new(Mutex::new(pieces)),
             peers: Arc::new(Mutex::new(Vec::new())),
-            file: Arc::new(Mutex::new(file)),
+            file_tx: tx,
         })
+    }
+
+    async fn disk_writer_task(
+        total_length: u64,
+        mut rx: mpsc::Receiver<Piece>,
+        name: String,
+    ) -> Result<()> {
+        let mut file = File::options()
+            .create(true)
+            .write(true)
+            .read(true)
+            .open(name)
+            .await?;
+
+        file.set_len(total_length).await?;
+
+        while let Some(piece) = rx.recv().await {
+            file.seek(io::SeekFrom::Start(
+                piece.index as u64 * piece.length as u64,
+            ))
+            .await?;
+
+            let data = match piece.state {
+                PieceState::Downloaded { data } => data,
+                _ => unreachable!("piece must be in Downloaded state here"),
+            };
+
+            file.write_all(&data).await?;
+            file.flush().await?;
+        }
+
+        Ok(())
     }
 }
 
