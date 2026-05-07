@@ -1,7 +1,6 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashSet},
     fs, io,
-    net::SocketAddr,
     path::Path,
     sync::{
         Arc,
@@ -18,7 +17,6 @@ use tokio::{
     sync::{
         Mutex,
         mpsc::{self},
-        oneshot,
     },
     task::JoinSet,
 };
@@ -147,19 +145,17 @@ impl Torrent {
     }
 
     pub async fn download(&self, client: &Client) -> Result<()> {
-        let info_hash = self.info_hash;
-        let peer_id = client.peer_id;
-        let num_pieces = self.piece_hashes.len();
-
         let (peer_tx, mut peer_rx) = mpsc::channel::<Vec<Peer>>(1);
-        
+
         let announce_task = tokio::spawn({
             let torrent = self.clone();
             let client = client.clone();
 
             async move {
+                let mut addr_set = HashSet::new();
+
                 loop {
-                    if torrent.announce().is_due() {
+                    if torrent.tracker.is_due() {
                         let addrs = torrent
                             .tracker
                             .announce(
@@ -174,11 +170,19 @@ impl Torrent {
                             )
                             .await?;
 
-                        let peers = addrs.into_iter().map(|addr| Peer::new(addr)).collect();
-                        peer_tx.send(peers).await?;
+                        let mut peers = Vec::new();
+                        for addr in addrs {
+                            if addr_set.insert(addr) {
+                                peers.push(Peer::new(addr));
+                            }
+                        }
+
+                        if !peers.is_empty() {
+                            peer_tx.send(peers).await?;
+                        }
                     }
 
-                    tokio::time::sleep(torrent.announce().interval()).await;
+                    tokio::time::sleep(torrent.tracker.interval()).await;
                 }
 
                 Ok::<(), anyhow::Error>(())
@@ -187,6 +191,7 @@ impl Torrent {
 
         let download_task = tokio::spawn({
             let torrent = self.clone();
+            let client = client.clone();
 
             async move {
                 let mut set = JoinSet::new();
@@ -197,7 +202,10 @@ impl Torrent {
 
                         set.spawn(async move {
                             let mut conn = match PeerConnection::connect(
-                                peer, &info_hash, &peer_id, num_pieces,
+                                peer,
+                                &torrent.info_hash,
+                                &client.peer_id,
+                                torrent.piece_hashes.len(),
                             )
                             .await
                             {
@@ -227,9 +235,9 @@ impl Torrent {
                             }
                         });
                     }
-                }
 
-                while let Some(_) = set.join_next().await {}
+                    while let Some(_) = set.join_next().await {}
+                }
             }
         });
 
