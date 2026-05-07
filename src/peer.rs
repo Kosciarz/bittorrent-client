@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, time::Duration};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -121,30 +121,30 @@ impl PeerConnection {
         let mut stream =
             match timeout(Duration::from_secs(5), TcpStream::connect(&peer.addr())).await {
                 Ok(Ok(s)) => s,
-                Ok(Err(e)) => return Err(anyhow!("connection failed: {e}")),
-                Err(_) => return Err(anyhow!("connection timed out")),
+                Ok(Err(e)) => bail!("connection failed: {e}"),
+                Err(_) => bail!("connection timed out"),
             };
 
         let handshake = &Self::build_handshake(info_hash, peer_id);
         if let Err(e) = stream.write_all(handshake).await {
-            return Err(anyhow!("failed to send handshake: {e}"));
+            bail!("failed to send handshake: {e}");
         }
 
         let mut buf = [0u8; HANDSHAKE_SIZE];
         if let Err(e) = stream.read_exact(&mut buf).await {
-            return Err(anyhow!("failed to read handshake: {e}"));
+            bail!("failed to read handshake: {e}");
         }
 
         if buf[0] != 19 {
-            return Err(anyhow!("invalid pstrlen"));
+            bail!("invalid pstrlen");
         }
 
         if &buf[1..20] != b"BitTorrent protocol" {
-            return Err(anyhow!("invalid pstr"));
+            bail!("invalid pstr");
         }
 
         if &buf[28..48] != info_hash {
-            return Err(anyhow!("info hash does not match"));
+            bail!("info hash does not match");
         }
 
         peer.peer_id = buf[48..68].try_into().unwrap();
@@ -248,17 +248,23 @@ impl PeerConnection {
                     block,
                 } => {
                     if index as usize != piece_index {
-                        return Err(anyhow!("received block for wrong piece"));
+                        bail!("received block for wrong piece");
                     }
 
                     piece_buf[(begin as usize)..(begin as usize + block.len())]
                         .copy_from_slice(&block);
                     blocks_received += 1;
                 }
-                Message::Choke => return Err(anyhow!("peer choked during download")),
+                Message::Choke => {
+                    self.peer.peer_choking = true;
+
+                    tokio::time::timeout(Duration::from_mins(1), self.wait_for_unchoke())
+                        .await
+                        .context("waiting for unchoke timed out")??;
+                }
                 Message::Unchoke => continue,
                 Message::KeepAlive => continue,
-                msg => return Err(anyhow!("unexpected message: {:?}", msg)),
+                msg => bail!("unexpected message: {:?}", msg),
             }
         }
 
@@ -267,6 +273,18 @@ impl PeerConnection {
             length: piece_length as usize,
             state: PieceState::Downloaded { data: piece_buf },
         })
+    }
+
+    async fn wait_for_unchoke(&mut self) -> Result<()> {
+        loop {
+            match self.read_message().await? {
+                Message::Unchoke => {
+                    self.peer.peer_choking = false;
+                    return Ok(());
+                }
+                _ => continue,
+            }
+        }
     }
 }
 

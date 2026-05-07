@@ -30,7 +30,7 @@ impl Client {
         let torrent = Torrent::load_from_file(path).await?;
         torrent.download(self).await?;
 
-        println!("download completed");
+        println!("Download completed");
 
         Ok(())
     }
