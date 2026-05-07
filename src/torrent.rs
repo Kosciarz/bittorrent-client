@@ -201,6 +201,7 @@ impl Torrent {
                         let mut torrent = torrent.clone();
 
                         set.spawn(async move {
+                            let addr = peer.addr();
                             let mut conn = match PeerConnection::connect(
                                 peer,
                                 &torrent.info_hash,
@@ -210,8 +211,8 @@ impl Torrent {
                             .await
                             {
                                 Ok(conn) => conn,
-                                Err((peer, e)) => {
-                                    eprintln!("Peer {} failed: {e}", peer.addr());
+                                Err(e) => {
+                                    eprintln!("Peer {addr} failed: {e}");
                                     return;
                                 }
                             };

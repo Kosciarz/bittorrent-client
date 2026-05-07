@@ -115,36 +115,36 @@ impl PeerConnection {
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
         num_pieces: usize,
-    ) -> Result<Self, (Peer, anyhow::Error)> {
+    ) -> Result<Self> {
         println!("\nTrying peer {}", peer.addr());
 
         let mut stream =
             match timeout(Duration::from_secs(5), TcpStream::connect(&peer.addr())).await {
                 Ok(Ok(s)) => s,
-                Ok(Err(e)) => return Err((peer, e.into())),
-                Err(_) => return Err((peer, anyhow!("Connection timed out"))),
+                Ok(Err(e)) => return Err(anyhow!("Connection failed: {e}")),
+                Err(_) => return Err(anyhow!("Connection timed out")),
             };
 
         let handshake = &Self::build_handshake(info_hash, peer_id);
         if let Err(e) = stream.write_all(handshake).await {
-            return Err((peer, e.into()));
+            return Err(anyhow!("Failed to send handshake: {e}"));
         }
 
         let mut buf = [0u8; HANDSHAKE_SIZE];
         if let Err(e) = stream.read_exact(&mut buf).await {
-            return Err((peer, e.into()));
+            return Err(anyhow!("Failed to read handshake: {e}"));
         }
 
         if buf[0] != 19 {
-            return Err((peer, anyhow!("Invalid pstrlen")));
+            return Err(anyhow!("Invalid pstrlen"));
         }
 
         if &buf[1..20] != b"BitTorrent protocol" {
-            return Err((peer, anyhow!("Invalid pstr")));
+            return Err(anyhow!("Invalid pstr"));
         }
 
         if &buf[28..48] != info_hash {
-            return Err((peer, anyhow!("Info hash does not match")));
+            return Err(anyhow!("Info hash does not match"));
         }
 
         peer.peer_id = buf[48..68].try_into().unwrap();
