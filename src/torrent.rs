@@ -233,12 +233,13 @@ impl Torrent {
                 .await
                 .context(format!("peer {addr} failed"))?;
 
-                conn.wait_until_ready()
-                    .await
-                    .context("failed to receive initial messages")?;
                 conn.send_interested()
                     .await
                     .context("failed to send interested")?;
+
+                conn.wait_until_ready()
+                    .await
+                    .context("failed to receive initial messages")?;
 
                 torrent
                     .download_from_peer(&mut conn)
