@@ -5,6 +5,7 @@ mod client;
 mod peer;
 mod torrent;
 mod tracker;
+mod file_writer;
 
 #[tokio::main]
 async fn main() -> Result<()> {

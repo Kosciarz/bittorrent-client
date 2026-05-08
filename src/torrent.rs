@@ -30,6 +30,7 @@ use crate::{
         object::{extract_byte_array, extract_dict, extract_list, extract_num, extract_str},
     },
     client::Client,
+    file_writer::FileWriter,
     peer::{BitField, Peer, PeerConnection},
     tracker::{AnnounceStats, Tracker},
 };
@@ -421,12 +422,9 @@ impl Torrent {
         let info_hash = compute_info_hash(&dict)?;
 
         let (file_tx, file_rx) = mpsc::channel::<Piece>(32);
-        tokio::spawn(Self::file_writer_task(
-            total_length,
-            piece_length,
-            file_rx,
-            name.clone(),
-        ));
+        let mut file_writer = FileWriter::new(file_rx, total_length, name.clone()).await?;
+
+        tokio::spawn(async move { file_writer.run().await });
 
         let (event_tx, _) = broadcast::channel(256);
 
@@ -448,37 +446,6 @@ impl Torrent {
             file_tx,
             event_tx,
         })
-    }
-
-    async fn file_writer_task(
-        total_length: u64,
-        piece_length: u64,
-        mut rx: mpsc::Receiver<Piece>,
-        name: String,
-    ) -> Result<()> {
-        let mut file = File::options()
-            .create(true)
-            .write(true)
-            .read(true)
-            .open(name)
-            .await?;
-
-        file.set_len(total_length).await?;
-
-        while let Some(piece) = rx.recv().await {
-            file.seek(io::SeekFrom::Start(piece.index as u64 * piece_length))
-                .await?;
-
-            let data = match piece.state {
-                PieceState::Downloaded { data } => data,
-                _ => unreachable!("piece must be in Downloaded state here"),
-            };
-
-            file.write_all(&data).await?;
-            file.flush().await?;
-        }
-
-        Ok(())
     }
 }
 
