@@ -223,38 +223,6 @@ impl Torrent {
         }
     }
 
-    fn process_peers(&self, peers: Vec<Peer>, join_set: &mut JoinSet<Result<()>>, client: &Client) {
-        for peer in peers {
-            let torrent = self.clone();
-            let client = client.clone();
-
-            join_set.spawn(async move {
-                let addr = peer.addr();
-                let mut conn = PeerConnection::connect(
-                    peer,
-                    &torrent.info_hash,
-                    &client.peer_id,
-                    torrent.piece_hashes.len(),
-                )
-                .await
-                .context(format!("peer {addr} failed"))?;
-
-                conn.send_interested()
-                    .await
-                    .context("failed to send interested")?;
-
-                conn.wait_until_ready()
-                    .await
-                    .context("failed to receive initial messages")?;
-
-                torrent
-                    .download_from_peer(&mut conn)
-                    .await
-                    .context("download failed")
-            });
-        }
-    }
-
     async fn run_download_loop(
         &self,
         mut peer_rx: mpsc::Receiver<Vec<Peer>>,
@@ -286,6 +254,38 @@ impl Torrent {
                     bail!("ran out of peers before download completed");
                 },
             }
+        }
+    }
+
+    fn process_peers(&self, peers: Vec<Peer>, join_set: &mut JoinSet<Result<()>>, client: &Client) {
+        for peer in peers {
+            let torrent = self.clone();
+            let client = client.clone();
+
+            join_set.spawn(async move {
+                let addr = peer.addr();
+                let mut conn = PeerConnection::connect(
+                    peer,
+                    &torrent.info_hash,
+                    &client.peer_id,
+                    torrent.piece_hashes.len(),
+                )
+                .await
+                .context(format!("peer {addr} failed"))?;
+
+                conn.send_interested()
+                    .await
+                    .context("failed to send interested")?;
+
+                conn.wait_until_ready()
+                    .await
+                    .context("failed to receive initial messages")?;
+
+                torrent
+                    .download_from_peer(&mut conn)
+                    .await
+                    .context("download failed")
+            });
         }
     }
 
