@@ -4,6 +4,7 @@ mod bencode;
 mod client;
 mod file_writer;
 mod peer;
+mod piece;
 mod piece_assembler;
 mod torrent;
 mod tracker;

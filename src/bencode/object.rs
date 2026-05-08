@@ -121,7 +121,7 @@ fn convert_info_dictionary(torrent: &Torrent) -> ObjectType {
 
     let mut piece_hashes_bytes: Vec<u8> = Vec::with_capacity(torrent.piece_hashes().len() * 20);
     for piece_hash in torrent.piece_hashes() {
-        piece_hashes_bytes.extend_from_slice(piece_hash);
+        piece_hashes_bytes.extend_from_slice(&piece_hash);
     }
 
     dict.insert(

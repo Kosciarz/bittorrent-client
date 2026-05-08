@@ -1,7 +1,7 @@
 use std::{env, path::Path};
 
 use crate::torrent::Torrent;
-use anyhow::{Result, anyhow};
+use anyhow::{Result};
 use rand::RngExt;
 
 #[derive(Debug, Clone)]

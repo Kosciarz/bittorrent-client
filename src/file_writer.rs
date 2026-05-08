@@ -4,20 +4,24 @@ use tokio::{
     sync::mpsc,
 };
 
-use crate::torrent::{Piece, PieceState};
 use anyhow::Result;
+
+use crate::piece::CompletedPiece;
 
 #[derive(Debug)]
 pub struct FileWriter {
-    file_rx: mpsc::Receiver<Piece>,
+    piece_length: u32,
+
+    file_rx: mpsc::Receiver<CompletedPiece>,
     file: File,
 }
 
 impl FileWriter {
     pub async fn new(
-        file_rx: mpsc::Receiver<Piece>,
         torrent_length: u64,
         name: String,
+        piece_length: u32,
+        file_rx: mpsc::Receiver<CompletedPiece>,
     ) -> Result<Self> {
         let file = File::options()
             .create(true)
@@ -28,23 +32,19 @@ impl FileWriter {
 
         file.set_len(torrent_length).await?;
 
-        Ok(Self { file_rx, file })
+        Ok(Self {
+            piece_length,
+            file_rx,
+            file,
+        })
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        while let Some(piece) = self.file_rx.recv().await {
-            self.file
-                .seek(io::SeekFrom::Start(
-                    piece.index as u64 * piece.length as u64,
-                ))
-                .await?;
+        while let Some(completed) = self.file_rx.recv().await {
+            let offset = (completed.index as u64) * (self.piece_length as u64);
+            self.file.seek(io::SeekFrom::Start(offset)).await?;
 
-            let data = match piece.state {
-                PieceState::Downloaded { data } => data,
-                _ => unreachable!("piece must be in Downloaded state here"),
-            };
-
-            self.file.write_all(&data).await?;
+            self.file.write_all(&completed.data).await?;
             self.file.flush().await?;
         }
 

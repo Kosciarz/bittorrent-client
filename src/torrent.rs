@@ -30,26 +30,10 @@ use crate::{
     client::Client,
     file_writer::FileWriter,
     peer::{BitField, Peer, PeerConnection},
+    piece::{ActivePiece, CompletedPiece, PieceInfo, PieceState},
     piece_assembler::PieceAssembler,
     tracker::{AnnounceStats, Tracker},
 };
-
-pub const BLOCK_SIZE: u32 = 16_384;
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum PieceState {
-    Missing,
-    InProgress,
-    Downloaded { data: Vec<u8> },
-    Done,
-}
-
-#[derive(Debug, Clone)]
-pub struct Piece {
-    pub index: usize,
-    pub length: usize,
-    pub state: PieceState,
-}
 
 #[derive(Debug, Clone)]
 pub enum TorrentEvent {
@@ -60,8 +44,8 @@ pub enum TorrentEvent {
 pub struct Torrent {
     // core download fields
     info_hash: [u8; 20],
-    piece_hashes: Vec<[u8; 20]>,
-    piece_length: u64,
+    pieces_info: Vec<PieceInfo>,
+    piece_length: u32,
     length: u64,
 
     // metadata (only for serialization/display)
@@ -76,10 +60,9 @@ pub struct Torrent {
     downloaded: Arc<AtomicU64>,
     left: Arc<AtomicU64>,
     uploaded: Arc<AtomicU64>,
-    pieces: Arc<Mutex<Vec<Piece>>>,
-    file_tx: mpsc::Sender<Piece>,
+    pieces: Arc<Mutex<Vec<PieceInfo>>>,
     event_tx: broadcast::Sender<TorrentEvent>,
-    piece_tx: mpsc::Sender<Piece>,
+    piece_tx: mpsc::Sender<ActivePiece>,
 }
 
 impl Torrent {
@@ -111,7 +94,7 @@ impl Torrent {
         self.length
     }
 
-    pub fn piece_length(&self) -> u64 {
+    pub fn piece_length(&self) -> u32 {
         self.piece_length
     }
 
@@ -119,16 +102,12 @@ impl Torrent {
         &self.info_hash
     }
 
-    pub fn piece_hashes(&self) -> &Vec<[u8; 20]> {
-        &self.piece_hashes
+    pub fn piece_hashes(&self) -> Vec<[u8; 20]> {
+        self.pieces_info.iter().map(|p| p.hash).collect()
     }
 
     pub async fn is_completed(&self) -> bool {
-        self.pieces
-            .lock()
-            .await
-            .iter()
-            .all(|p| p.state == PieceState::Done)
+        self.pieces_info.iter().all(|p| p.state == PieceState::Done)
     }
 
     pub async fn load_from_file(path: &Path) -> Result<Torrent> {
@@ -269,7 +248,7 @@ impl Torrent {
                     peer,
                     &torrent.info_hash,
                     &client.peer_id,
-                    torrent.piece_hashes.len(),
+                    torrent.pieces_info.len(),
                 )
                 .await
                 .context(format!("peer {addr} failed"))?;
@@ -311,10 +290,7 @@ impl Torrent {
                 break;
             };
 
-            let piece_len = {
-                let pieces = self.pieces.lock().await;
-                pieces[piece_idx].length as u64
-            };
+            let piece_len = self.pieces_info[piece_idx].length;
 
             let res = tokio::time::timeout(
                 Duration::from_mins(3),
@@ -337,8 +313,6 @@ impl Torrent {
             self.downloaded
                 .fetch_add(piece.length as u64, Ordering::Relaxed);
             self.left.fetch_sub(piece.length as u64, Ordering::Relaxed);
-
-            self.file_tx.send(piece.clone()).await?;
 
             self.pieces.lock().await[piece.index].state = PieceState::Done;
 
@@ -380,37 +354,39 @@ impl Torrent {
         let name = extract_str(&info_obj, b"name")?;
         let total_length = u64::try_from(extract_num(&info_obj, b"length")?)
             .map_err(|_| anyhow!("length is negative or too large"))?;
-        let piece_length = u64::try_from(extract_num(&info_obj, b"piece length")?)
+        let piece_length = u32::try_from(extract_num(&info_obj, b"piece length")?)
             .map_err(|_| anyhow!("piece length is negative or too large"))?;
         let piece_hashes = extract_pieces(&info_obj)?;
 
         let mut pieces = Vec::with_capacity(piece_hashes.len());
-        for i in 0..piece_hashes.len() {
+        for (i, hash) in piece_hashes.iter().enumerate() {
             let length = if i == piece_hashes.len() - 1 {
-                let last_piece_length = total_length - (piece_length * (i as u64));
+                let last_piece_length = total_length - ((piece_length as u64) * (i as u64));
                 assert!(
-                    last_piece_length > 0 && last_piece_length <= piece_length,
+                    last_piece_length > 0 && last_piece_length <= piece_length as u64,
                     "last piece length {last_piece_length} is out of range"
                 );
-                last_piece_length
+                last_piece_length as u32
             } else {
-                piece_length
+                piece_length as u32
             };
 
-            pieces.push(Piece {
+            pieces.push(PieceInfo {
                 index: i,
-                length: length as usize,
+                length,
+                hash: *hash,
                 state: PieceState::Missing,
             });
         }
 
         let info_hash = compute_info_hash(&dict)?;
 
-        let (file_tx, file_rx) = mpsc::channel::<Piece>(32);
-        let mut file_writer = FileWriter::new(file_rx, total_length, name.clone()).await?;
+        let (file_tx, file_rx) = mpsc::channel::<CompletedPiece>(32);
+        let mut file_writer =
+            FileWriter::new(total_length, name.clone(), piece_length, file_rx).await?;
         tokio::spawn(async move { file_writer.run().await });
 
-        let (piece_tx, piece_rx) = mpsc::channel::<Piece>(32);
+        let (piece_tx, piece_rx) = mpsc::channel::<ActivePiece>(32);
         let mut piece_assembler =
             PieceAssembler::new(piece_hashes.clone(), piece_rx, file_tx.clone());
         tokio::spawn(async move { piece_assembler.run().await });
@@ -419,7 +395,7 @@ impl Torrent {
 
         Ok(Torrent {
             info_hash,
-            piece_hashes,
+            pieces_info: pieces.clone(),
             piece_length,
             length: total_length,
             name,
@@ -432,7 +408,6 @@ impl Torrent {
             left: Arc::new(total_length.into()),
             uploaded: Arc::new(0.into()),
             pieces: Arc::new(Mutex::new(pieces)),
-            file_tx,
             event_tx,
             piece_tx,
         })

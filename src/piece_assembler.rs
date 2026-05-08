@@ -1,36 +1,39 @@
-use sha1::{Digest, Sha1};
 use tokio::sync::mpsc;
 
-use crate::torrent::{Piece, PieceState};
+use crate::piece::{ActivePiece, CompletedPiece};
 
 #[derive(Debug)]
 pub struct PieceAssembler {
     piece_hashes: Vec<[u8; 20]>,
 
-    piece_rx: mpsc::Receiver<Piece>,
-    file_tx: mpsc::Sender<Piece>,
+    piece_rx: mpsc::Receiver<ActivePiece>,
+    file_tx: mpsc::Sender<CompletedPiece>,
 }
 
 impl PieceAssembler {
-    pub fn new(piece_hashes: Vec<[u8; 20]>, piece_rx: mpsc::Receiver<Piece>, file_tx: mpsc::Sender<Piece>) -> Self {
-        Self { piece_hashes, piece_rx, file_tx }
-    }
-
-    pub async fn run(&mut self) {
-        while let Some(piece) = self.piece_rx.recv().await {
-            if self.verify_piece(&piece) {
-                let _ = self.file_tx.send(piece).await;
-            }
+    pub fn new(
+        piece_hashes: Vec<[u8; 20]>,
+        piece_rx: mpsc::Receiver<ActivePiece>,
+        file_tx: mpsc::Sender<CompletedPiece>,
+    ) -> Self {
+        Self {
+            piece_hashes,
+            piece_rx,
+            file_tx,
         }
     }
 
-    fn verify_piece(&self, piece: &Piece) -> bool {
-        let data = match &piece.state {
-            PieceState::Downloaded { data } => data,
-            _ => unreachable!("piece must be in Downloaded state here"),
-        };
-
-        let piece_hash: [u8; 20] = Sha1::digest(&data).into();
-        piece_hash != self.piece_hashes[piece.index]
+    pub async fn run(&mut self) {
+        while let Some(mut piece) = self.piece_rx.recv().await {
+            if piece.verify(&self.piece_hashes[piece.index]) {
+                let _ = self
+                    .file_tx
+                    .send(CompletedPiece {
+                        index: piece.index,
+                        data: std::mem::take(&mut piece.data),
+                    })
+                    .await;
+            }
+        }
     }
 }

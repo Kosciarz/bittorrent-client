@@ -1,13 +1,13 @@
 use std::{net::SocketAddr, time::Duration};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     time::timeout,
 };
 
-use crate::torrent::{BLOCK_SIZE, Piece, PieceState};
+use crate::piece::{ActivePiece, BLOCK_SIZE};
 
 const HANDSHAKE_SIZE: usize = 68;
 
@@ -226,8 +226,12 @@ impl PeerConnection {
         }
     }
 
-    pub async fn download_piece(&mut self, piece_index: usize, piece_length: u64) -> Result<Piece> {
-        let num_blocks = (piece_length + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64;
+    pub async fn download_piece(
+        &mut self,
+        piece_index: usize,
+        piece_length: u32,
+    ) -> Result<ActivePiece> {
+        let num_blocks = (piece_length + BLOCK_SIZE - 1) / BLOCK_SIZE;
         let mut piece_buf = vec![0u8; piece_length as usize];
         let mut blocks_received = 0;
 
@@ -280,10 +284,10 @@ impl PeerConnection {
             }
         }
 
-        return Ok(Piece {
+        return Ok(ActivePiece {
             index: piece_index,
-            length: piece_length as usize,
-            state: PieceState::Downloaded { data: piece_buf },
+            length: piece_length,
+            data: piece_buf,
         });
     }
 
@@ -291,9 +295,9 @@ impl PeerConnection {
         &mut self,
         block_num: usize,
         piece_index: usize,
-        piece_length: u64,
+        piece_length: u32,
     ) -> Result<()> {
-        let begin = block_num as u32 * BLOCK_SIZE;
+        let begin = (block_num as u32) * BLOCK_SIZE;
         let length = BLOCK_SIZE.min(piece_length as u32 - begin);
 
         self.send_message(Message::Request {
