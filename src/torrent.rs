@@ -71,7 +71,6 @@ pub struct Torrent {
     left: Arc<AtomicU64>,
     uploaded: Arc<AtomicU64>,
     pieces: Arc<Mutex<Vec<Piece>>>,
-    peers: Arc<Mutex<Vec<Peer>>>,
     file_tx: mpsc::Sender<Piece>,
 }
 
@@ -418,7 +417,6 @@ impl Torrent {
             left: Arc::new(total_length.into()),
             uploaded: Arc::new(0.into()),
             pieces: Arc::new(Mutex::new(pieces)),
-            peers: Arc::new(Mutex::new(Vec::new())),
             file_tx,
         })
     }
