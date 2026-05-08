@@ -2,10 +2,11 @@ use anyhow::Result;
 
 mod bencode;
 mod client;
+mod file_writer;
 mod peer;
+mod piece_assembler;
 mod torrent;
 mod tracker;
-mod file_writer;
 
 #[tokio::main]
 async fn main() -> Result<()> {

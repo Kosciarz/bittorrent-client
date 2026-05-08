@@ -12,8 +12,6 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use sha1::{Digest, Sha1};
 use tokio::{
-    fs::File,
-    io::{AsyncSeekExt, AsyncWriteExt},
     sync::{
         Mutex,
         broadcast::{self, error::TryRecvError},
@@ -32,6 +30,7 @@ use crate::{
     client::Client,
     file_writer::FileWriter,
     peer::{BitField, Peer, PeerConnection},
+    piece_assembler::PieceAssembler,
     tracker::{AnnounceStats, Tracker},
 };
 
@@ -80,6 +79,7 @@ pub struct Torrent {
     pieces: Arc<Mutex<Vec<Piece>>>,
     file_tx: mpsc::Sender<Piece>,
     event_tx: broadcast::Sender<TorrentEvent>,
+    piece_tx: mpsc::Sender<Piece>,
 }
 
 impl Torrent {
@@ -332,7 +332,21 @@ impl Torrent {
                 }
             };
 
-            self.verify_and_store_piece(piece).await?;
+            let _ = self.piece_tx.send(piece.clone()).await;
+
+            self.downloaded
+                .fetch_add(piece.length as u64, Ordering::Relaxed);
+            self.left.fetch_sub(piece.length as u64, Ordering::Relaxed);
+
+            self.file_tx.send(piece.clone()).await?;
+
+            self.pieces.lock().await[piece.index].state = PieceState::Done;
+
+            let _ = self.event_tx.send(TorrentEvent::PieceCompleted {
+                piece_index: piece.index,
+            });
+
+            println!("Downloaded piece {}", piece.index);
         }
 
         Ok(())
@@ -345,35 +359,6 @@ impl Torrent {
         })?;
         pieces[idx].state = PieceState::InProgress;
         Some(idx)
-    }
-
-    async fn verify_and_store_piece(&self, piece: Piece) -> Result<()> {
-        let data = match &piece.state {
-            PieceState::Downloaded { data } => data,
-            _ => unreachable!("piece must be in Downloaded state here"),
-        };
-
-        let piece_hash: [u8; 20] = Sha1::digest(&data).into();
-        if piece_hash != self.piece_hashes[piece.index] {
-            self.pieces.lock().await[piece.index].state = PieceState::Missing;
-            bail!("piece {} hash mismatch", piece.index);
-        }
-
-        self.downloaded
-            .fetch_add(piece.length as u64, Ordering::Relaxed);
-        self.left.fetch_sub(piece.length as u64, Ordering::Relaxed);
-
-        self.file_tx.send(piece.clone()).await?;
-
-        self.pieces.lock().await[piece.index].state = PieceState::Done;
-
-        let _ = self.event_tx.send(TorrentEvent::PieceCompleted {
-            piece_index: piece.index,
-        });
-
-        println!("Downloaded piece {}", piece.index);
-
-        Ok(())
     }
 
     async fn from_object(object: Object) -> Result<Self> {
@@ -423,8 +408,12 @@ impl Torrent {
 
         let (file_tx, file_rx) = mpsc::channel::<Piece>(32);
         let mut file_writer = FileWriter::new(file_rx, total_length, name.clone()).await?;
-
         tokio::spawn(async move { file_writer.run().await });
+
+        let (piece_tx, piece_rx) = mpsc::channel::<Piece>(32);
+        let mut piece_assembler =
+            PieceAssembler::new(piece_hashes.clone(), piece_rx, file_tx.clone());
+        tokio::spawn(async move { piece_assembler.run().await });
 
         let (event_tx, _) = broadcast::channel(256);
 
@@ -445,6 +434,7 @@ impl Torrent {
             pieces: Arc::new(Mutex::new(pieces)),
             file_tx,
             event_tx,
+            piece_tx,
         })
     }
 }
