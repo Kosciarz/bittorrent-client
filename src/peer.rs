@@ -303,6 +303,10 @@ impl PeerConnection {
         })
         .await
     }
+
+    pub async fn send_have(&mut self, piece_index: usize) -> Result<()> {
+        self.send_message(Message::Have(piece_index as u32)).await
+    }
 }
 
 #[derive(Debug)]

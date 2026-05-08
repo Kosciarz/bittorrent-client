@@ -16,6 +16,7 @@ use tokio::{
     io::{AsyncSeekExt, AsyncWriteExt},
     sync::{
         Mutex,
+        broadcast::{self, error::TryRecvError},
         mpsc::{self, Sender},
     },
     task::JoinSet,
@@ -51,6 +52,11 @@ pub struct Piece {
 }
 
 #[derive(Debug, Clone)]
+pub enum TorrentEvent {
+    PieceCompleted { piece_index: usize },
+}
+
+#[derive(Debug, Clone)]
 pub struct Torrent {
     // core download fields
     info_hash: [u8; 20],
@@ -72,6 +78,7 @@ pub struct Torrent {
     uploaded: Arc<AtomicU64>,
     pieces: Arc<Mutex<Vec<Piece>>>,
     file_tx: mpsc::Sender<Piece>,
+    event_tx: broadcast::Sender<TorrentEvent>,
 }
 
 impl Torrent {
@@ -283,7 +290,22 @@ impl Torrent {
     }
 
     async fn download_from_peer(&self, conn: &mut PeerConnection) -> Result<()> {
+        let mut event_rx = self.event_tx.subscribe();
+
         loop {
+            loop {
+                match event_rx.try_recv() {
+                    Ok(TorrentEvent::PieceCompleted { piece_index }) => {
+                        conn.send_have(piece_index).await?;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Lagged(n)) => {
+                        println!("have broadcast lagged by {n}")
+                    }
+                    Err(TryRecvError::Closed) => return Ok(()),
+                }
+            }
+
             let Some(piece_idx) = self.pick_piece(conn.peer().bitfield()).await else {
                 break;
             };
@@ -344,7 +366,11 @@ impl Torrent {
 
         self.pieces.lock().await[piece.index].state = PieceState::Done;
 
-        println!("downloaded piece {}", piece.index);
+        let _ = self.event_tx.send(TorrentEvent::PieceCompleted {
+            piece_index: piece.index,
+        });
+
+        println!("Downloaded piece {}", piece.index);
 
         Ok(())
     }
@@ -402,6 +428,8 @@ impl Torrent {
             name.clone(),
         ));
 
+        let (event_tx, _) = broadcast::channel(256);
+
         Ok(Torrent {
             info_hash,
             piece_hashes,
@@ -418,6 +446,7 @@ impl Torrent {
             uploaded: Arc::new(0.into()),
             pieces: Arc::new(Mutex::new(pieces)),
             file_tx,
+            event_tx,
         })
     }
 
