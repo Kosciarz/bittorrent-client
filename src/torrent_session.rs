@@ -144,36 +144,36 @@ impl TorrentSession {
     ) -> Result<()> {
         let mut addr_set = HashSet::new();
 
+        let mut interval = tokio::time::interval(self.tracker.interval());
+
         loop {
-            if self.tracker.is_due() {
-                let addrs = self
-                    .tracker
-                    .announce(
-                        &self.info.info_hash,
-                        &client.peer_id,
-                        client.port,
-                        &AnnounceStats {
-                            uploaded: self.stats.uploaded.load(Ordering::Relaxed),
-                            downloaded: self.stats.downloaded.load(Ordering::Relaxed),
-                            left: self.stats.left.load(Ordering::Relaxed),
-                        },
-                    )
-                    .await?;
-
-                let mut peers = Vec::new();
-                for addr in addrs {
-                    if addr_set.insert(addr) {
-                        peers.push(Peer::new(addr));
-                    }
-                }
-
-                if !peers.is_empty() {
-                    peer_tx.send(peers).await?;
-                }
-            }
-
             tokio::select! {
-                _ = tokio::time::sleep(self.tracker.interval()) => {},
+                _ = interval.tick() => {
+                    let addrs = self
+                        .tracker
+                        .announce(
+                            &self.info.info_hash,
+                            &client.peer_id,
+                            client.port,
+                            &AnnounceStats {
+                                uploaded: self.stats.uploaded.load(Ordering::Relaxed),
+                                downloaded: self.stats.downloaded.load(Ordering::Relaxed),
+                                left: self.stats.left.load(Ordering::Relaxed),
+                            },
+                        )
+                        .await?;
+
+                    let mut peers = Vec::new();
+                    for addr in addrs {
+                        if addr_set.insert(addr) {
+                            peers.push(Peer::new(addr));
+                        }
+                    }
+
+                    if !peers.is_empty() {
+                        peer_tx.send(peers).await?;
+                    }
+                },
                 _ = cancel.cancelled() => return Ok(())
             }
         }
