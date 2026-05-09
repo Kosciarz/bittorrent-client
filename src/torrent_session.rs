@@ -159,7 +159,7 @@ impl TorrentSession {
                     let mut peers = Vec::new();
                     for addr in addrs {
                         if addr_set.insert(addr) {
-                            peers.push(Peer::new(addr));
+                            peers.push(Peer { addr });
                         }
                     }
 
@@ -212,7 +212,7 @@ impl TorrentSession {
             let client = client.clone();
 
             join_set.spawn(async move {
-                let addr = peer.addr();
+                let addr = peer.addr;
                 let mut conn = PeerConnection::connect(
                     peer,
                     &torrent.info.info_hash,
@@ -255,8 +255,7 @@ impl TorrentSession {
                 }
             }
 
-            let Some(piece_idx) = self.piece_picker.claim_piece(conn.peer().bitfield()).await
-            else {
+            let Some(piece_idx) = self.piece_picker.claim_piece(conn.bitfield()).await else {
                 break;
             };
 

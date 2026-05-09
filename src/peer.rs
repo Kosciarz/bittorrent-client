@@ -16,7 +16,13 @@ const HANDSHAKE_SIZE: usize = 68;
 
 #[derive(Debug, Clone)]
 pub struct Peer {
-    addr: SocketAddr,
+    pub addr: SocketAddr,
+}
+#[derive(Debug)]
+pub struct PeerConnection {
+    peer: Peer,
+    stream: TcpStream,
+    num_pieces: usize,
     peer_id: [u8; 20],
     bitfield: BitField,
     am_choking: bool,
@@ -25,21 +31,9 @@ pub struct Peer {
     peer_interested: bool,
 }
 
-impl Peer {
-    pub fn new(addr: SocketAddr) -> Self {
-        Self {
-            addr,
-            peer_id: [0u8; 20],
-            bitfield: BitField::empty(0),
-            am_choking: true,
-            am_interested: false,
-            peer_choking: true,
-            peer_interested: false,
-        }
-    }
-
-    pub fn addr(&self) -> SocketAddr {
-        self.addr
+impl PeerConnection {
+    pub fn peer(&self) -> &Peer {
+        &self.peer
     }
 
     pub fn is_chocked(&self) -> bool {
@@ -61,19 +55,6 @@ impl Peer {
     pub fn set_bitfield(&mut self, bitfield: BitField) {
         self.bitfield = bitfield;
     }
-}
-
-#[derive(Debug)]
-pub struct PeerConnection {
-    peer: Peer,
-    stream: TcpStream,
-    num_pieces: usize,
-}
-
-impl PeerConnection {
-    pub fn peer(&self) -> &Peer {
-        &self.peer
-    }
 
     pub async fn connect(
         mut peer: Peer,
@@ -81,14 +62,14 @@ impl PeerConnection {
         peer_id: &[u8; 20],
         num_pieces: usize,
     ) -> Result<Self> {
-        println!("\nTrying peer {}", peer.addr());
+        println!("\nTrying peer {}", peer.addr);
 
-        let mut stream =
-            match timeout(Duration::from_secs(5), TcpStream::connect(&peer.addr())).await {
-                Ok(Ok(s)) => s,
-                Ok(Err(e)) => bail!("connection failed: {e}"),
-                Err(_) => bail!("connection timed out"),
-            };
+        let mut stream = match timeout(Duration::from_secs(5), TcpStream::connect(&peer.addr)).await
+        {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => bail!("connection failed: {e}"),
+            Err(_) => bail!("connection timed out"),
+        };
 
         let handshake = &Self::build_handshake(info_hash, peer_id);
         if let Err(e) = stream.write_all(handshake).await {
@@ -112,15 +93,18 @@ impl PeerConnection {
             bail!("info hash does not match");
         }
 
-        peer.peer_id = buf[48..68].try_into().unwrap();
-        peer.set_bitfield(BitField::empty(num_pieces));
-
-        println!("Connected to peer: {}", peer.addr());
+        println!("Connected to peer: {}", peer.addr);
 
         Ok(PeerConnection {
             peer,
             stream,
             num_pieces,
+            peer_id: buf[48..68].try_into().unwrap(),
+            bitfield: BitField::empty(num_pieces),
+            am_choking: true,
+            am_interested: false,
+            peer_choking: true,
+            peer_interested: false,
         })
     }
 
@@ -162,22 +146,22 @@ impl PeerConnection {
         loop {
             match self.read_message().await? {
                 Message::BitField(b) => {
-                    self.peer.set_bitfield(BitField::new(b, self.num_pieces));
+                    self.bitfield = BitField::new(b, self.num_pieces);
                 }
                 Message::Have(index) => {
-                    self.peer.bitfield_mut().set_piece(index as usize);
+                    self.bitfield.set_piece(index as usize);
                 }
                 Message::Choke => {
-                    self.peer.peer_choking = true;
+                    self.peer_choking = true;
                 }
                 Message::Unchoke => {
-                    self.peer.peer_choking = false;
+                    self.peer_choking = false;
                 }
                 Message::Interested => {
-                    self.peer.peer_interested = true;
+                    self.peer_interested = true;
                 }
                 Message::NotInterested => {
-                    self.peer.peer_interested = false;
+                    self.peer_interested = false;
                 }
                 Message::KeepAlive => continue,
                 msg => {
@@ -185,7 +169,7 @@ impl PeerConnection {
                 }
             }
 
-            if !self.peer.peer_choking {
+            if !self.peer_choking {
                 return Ok(());
             }
         }
@@ -227,22 +211,22 @@ impl PeerConnection {
                     blocks_received += 1;
                 }
                 Message::BitField(b) => {
-                    self.peer.set_bitfield(BitField::new(b, self.num_pieces));
+                    self.bitfield = BitField::new(b, self.num_pieces);
                 }
                 Message::Have(index) => {
-                    self.peer.bitfield_mut().set_piece(index as usize);
+                    self.bitfield.set_piece(index as usize);
                 }
                 Message::Choke => {
-                    self.peer.peer_choking = true;
+                    self.peer_choking = true;
                 }
                 Message::Unchoke => {
-                    self.peer.peer_choking = false;
+                    self.peer_choking = false;
                 }
                 Message::Interested => {
-                    self.peer.peer_interested = true;
+                    self.peer_interested = true;
                 }
                 Message::NotInterested => {
-                    self.peer.peer_interested = false;
+                    self.peer_interested = false;
                 }
                 Message::KeepAlive => continue,
                 msg => println!("unexpected message: {:?}", msg),
