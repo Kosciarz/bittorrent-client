@@ -1,16 +1,18 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::mpsc,
+    sync::{mpsc, oneshot},
     time::timeout,
 };
 
 use crate::{
     bitfield::BitField,
     piece::{ActivePiece, BLOCK_SIZE},
+    piece_picker::{PieceEvent, PiecePickerCommand},
+    torrent_info::TorrentInfo,
 };
 
 const HANDSHAKE_SIZE: usize = 68;
@@ -21,6 +23,8 @@ pub struct Peer {
 }
 #[derive(Debug)]
 pub struct PeerConnection {
+    info: Arc<TorrentInfo>,
+
     peer: Peer,
     stream: TcpStream,
     num_pieces: usize,
@@ -32,6 +36,8 @@ pub struct PeerConnection {
     peer_interested: bool,
 
     active_piece_tx: mpsc::Sender<ActivePiece>,
+    piece_picker_event_tx: mpsc::Sender<PiecePickerCommand>,
+    piece_event_tx: mpsc::Sender<PieceEvent>,
 }
 
 impl PeerConnection {
@@ -60,11 +66,12 @@ impl PeerConnection {
     }
 
     pub async fn connect(
+        info: Arc<TorrentInfo>,
         peer: Peer,
-        info_hash: &[u8; 20],
         peer_id: &[u8; 20],
-        num_pieces: usize,
         active_piece_tx: mpsc::Sender<ActivePiece>,
+        piece_picker_event_tx: mpsc::Sender<PiecePickerCommand>,
+        piece_event_tx: mpsc::Sender<PieceEvent>,
     ) -> Result<Self> {
         println!("\nTrying peer {}", peer.addr);
 
@@ -75,7 +82,7 @@ impl PeerConnection {
             Err(_) => bail!("connection timed out"),
         };
 
-        let handshake = &Self::build_handshake(info_hash, peer_id);
+        let handshake = &Self::build_handshake(&info.info_hash, peer_id);
         if let Err(e) = stream.write_all(handshake).await {
             bail!("failed to send handshake: {e}");
         }
@@ -93,13 +100,16 @@ impl PeerConnection {
             bail!("invalid pstr");
         }
 
-        if &buf[28..48] != info_hash {
+        if &buf[28..48] != info.info_hash {
             bail!("info hash does not match");
         }
 
         println!("Connected to peer: {}", peer.addr);
 
+        let num_pieces = info.pieces.len();
+
         Ok(PeerConnection {
+            info,
             peer,
             stream,
             num_pieces,
@@ -110,7 +120,48 @@ impl PeerConnection {
             peer_choking: true,
             peer_interested: false,
             active_piece_tx,
+            piece_picker_event_tx,
+            piece_event_tx
         })
+    }
+
+    pub async fn run(&mut self) -> Result<()> {
+        loop {
+            let (tx, rx) = oneshot::channel();
+
+            self.piece_picker_event_tx
+                .send(PiecePickerCommand::RequestPiece {
+                    bitfield: self.bitfield().clone(),
+                    response_tx: tx,
+                })
+                .await?;
+
+            let piece_index = match rx.await? {
+                Some(idx) => idx,
+                None => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+
+            let piece_len = self.info.pieces[piece_index].length;
+
+            let res = tokio::time::timeout(
+                Duration::from_mins(3),
+                self.download_piece(piece_index, piece_len),
+            )
+            .await
+            .context("download timed out")
+            .flatten();
+
+            if let Err(e) = res {
+                let _ = self
+                    .piece_event_tx
+                    .send(PieceEvent::DownloadFailed { piece_index })
+                    .await;
+                return Err(e);
+            }
+        }
     }
 
     fn build_handshake(info_hash: &[u8], client_id: &[u8]) -> Vec<u8> {
