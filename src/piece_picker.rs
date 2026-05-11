@@ -27,7 +27,6 @@ pub enum PiecePickerCommand {
 #[derive(Debug)]
 pub struct PiecePicker {
     states: Vec<PieceState>,
-    completed: usize,
 
     piece_event_rx: mpsc::Receiver<PieceEvent>,
     piece_picker_command_rx: mpsc::Receiver<PiecePickerCommand>,
@@ -43,7 +42,6 @@ impl PiecePicker {
     ) -> Self {
         Self {
             states: vec![PieceState::Missing; num_pieces],
-            completed: 0,
             piece_event_rx,
             piece_picker_command_rx,
             torrent_event_tx,
@@ -62,7 +60,7 @@ impl PiecePicker {
                         PieceEvent::Completed { piece_index } => {
                             self.mark_as_completed(piece_index);
 
-                            if self.completed == self.states.len() {
+                            if self.is_finished() {
                                 let _ = self.torrent_event_tx.send(TorrentEvent::Completed).await;
                                 return;
                             }
@@ -90,16 +88,19 @@ impl PiecePicker {
         Some(idx)
     }
 
-    pub fn mark_as_completed(&mut self, index: usize) {
+    fn mark_as_completed(&mut self, index: usize) {
         if self.states[index] == PieceState::InProgress {
             self.states[index] = PieceState::Completed;
-            self.completed += 1;
         }
     }
 
-    pub fn mark_as_failed(&mut self, index: usize) {
+    fn mark_as_failed(&mut self, index: usize) {
         if self.states[index] == PieceState::InProgress {
             self.states[index] = PieceState::Missing;
         }
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.states.iter().all(|state| *state == PieceState::Completed)
     }
 }
