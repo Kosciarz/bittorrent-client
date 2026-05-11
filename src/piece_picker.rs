@@ -1,6 +1,6 @@
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{bitfield::BitField};
+use crate::{bitfield::BitField, torrent_session::TorrentEvent};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PieceState {
@@ -27,9 +27,11 @@ pub enum PiecePickerCommand {
 #[derive(Debug)]
 pub struct PiecePicker {
     states: Vec<PieceState>,
+    completed: usize,
 
     piece_event_rx: mpsc::Receiver<PieceEvent>,
     piece_picker_event_rx: mpsc::Receiver<PiecePickerCommand>,
+    torrent_event_tx: mpsc::Sender<TorrentEvent>,
 }
 
 impl PiecePicker {
@@ -37,11 +39,14 @@ impl PiecePicker {
         num_pieces: usize,
         piece_event_rx: mpsc::Receiver<PieceEvent>,
         piece_picker_event_rx: mpsc::Receiver<PiecePickerCommand>,
+        torrent_event_tx: mpsc::Sender<TorrentEvent>,
     ) -> Self {
         Self {
             states: vec![PieceState::Missing; num_pieces],
+            completed: 0,
             piece_event_rx,
             piece_picker_event_rx,
+            torrent_event_tx,
         }
     }
 
@@ -56,6 +61,11 @@ impl PiecePicker {
                         }
                         PieceEvent::Completed { piece_index } => {
                             self.mark_as_completed(piece_index);
+
+                            if self.completed == self.states.len() {
+                                let _ = self.torrent_event_tx.send(TorrentEvent::Completed).await;
+                                return;
+                            }
                         },
                     }
                 }
@@ -81,11 +91,16 @@ impl PiecePicker {
     }
 
     pub fn mark_as_completed(&mut self, index: usize) {
-        self.states[index] = PieceState::Completed;
+        if self.states[index] == PieceState::InProgress {
+            self.states[index] = PieceState::Completed;
+            self.completed += 1;
+        }
     }
 
     pub fn mark_as_failed(&mut self, index: usize) {
-        self.states[index] = PieceState::Missing;
+        if self.states[index] == PieceState::InProgress {
+            self.states[index] = PieceState::Missing;
+        }
     }
 
     pub fn is_finished(&self) -> bool {

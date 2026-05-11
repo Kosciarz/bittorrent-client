@@ -10,8 +10,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use tokio::{
     sync::{
-        mpsc::{self, Sender},
-        oneshot,
+        Mutex, mpsc::{self, Sender}, oneshot
     },
     task::JoinSet,
 };
@@ -35,6 +34,11 @@ pub struct Stats {
     pub uploaded: AtomicU64,
 }
 
+#[derive(Debug)]
+pub enum TorrentEvent {
+    Completed,
+}
+
 #[derive(Debug, Clone)]
 pub struct TorrentSession {
     pub info: Arc<TorrentInfo>,
@@ -46,20 +50,33 @@ pub struct TorrentSession {
     piece_event_tx: mpsc::Sender<PieceEvent>,
     piece_picker_event_tx: mpsc::Sender<PiecePickerCommand>,
     piece_tx: mpsc::Sender<ActivePiece>,
+    torrent_event_rx: Arc<Mutex<mpsc::Receiver<TorrentEvent>>>,
 }
 
 impl TorrentSession {
     pub async fn new(info: Arc<TorrentInfo>) -> Result<Self> {
+        let (torrent_event_tx, torrent_event_rx) = mpsc::channel(10);
+
         let (piece_event_tx, piece_event_rx) = mpsc::channel(256);
 
         let (piece_picker_event_tx, piece_picker_event_rx) = mpsc::channel(32);
-        let mut piece_picker =
-        PiecePicker::new(info.pieces.len(), piece_event_rx, piece_picker_event_rx);
+        let mut piece_picker = PiecePicker::new(
+            info.pieces.len(),
+            piece_event_rx,
+            piece_picker_event_rx,
+            torrent_event_tx,
+        );
         tokio::spawn(async move { piece_picker.run().await });
 
         let (completed_piece_tx, completed_piece_rx) = mpsc::channel::<CompletedPiece>(32);
-        let mut file_writer =
-        FileWriter::new(info.length, info.name.clone(), info.piece_length, completed_piece_rx, piece_event_tx.clone()).await?;
+        let mut file_writer = FileWriter::new(
+            info.length,
+            info.name.clone(),
+            info.piece_length,
+            completed_piece_rx,
+            piece_event_tx.clone(),
+        )
+        .await?;
         tokio::spawn(async move { file_writer.run().await });
 
         let (piece_tx, piece_rx) = mpsc::channel::<ActivePiece>(32);
@@ -98,6 +115,7 @@ impl TorrentSession {
             piece_event_tx,
             piece_picker_event_tx,
             piece_tx,
+            torrent_event_rx: Arc::new(Mutex::new(torrent_event_rx)),
         })
     }
 
@@ -115,7 +133,7 @@ impl TorrentSession {
         });
 
         let download_task = tokio::spawn({
-            let torrent = self.clone();
+            let mut torrent = self.clone();
             let client = client.clone();
             let cancel = cancel.clone();
 
@@ -174,7 +192,7 @@ impl TorrentSession {
     }
 
     async fn run_download_loop(
-        &self,
+        &mut self,
         mut peer_rx: mpsc::Receiver<Vec<Peer>>,
         client: &Client,
         cancel: CancellationToken,
@@ -182,6 +200,8 @@ impl TorrentSession {
         let mut join_set = JoinSet::new();
 
         loop {
+            let mut torrent_event_rx = self.torrent_event_rx.lock().await;
+
             tokio::select! {
                 Some(peers) = peer_rx.recv() => {
                     self.process_peers(peers, &mut join_set, client);
@@ -191,6 +211,15 @@ impl TorrentSession {
                         Ok(Ok(())) => {},
                         Ok(Err(e)) => eprintln!("peer connection failed: {e}"),
                         Err(e) => eprintln!("peer task panicked: {e}"),
+                    }
+                }
+                Some(event) = torrent_event_rx.recv() => {
+                    match event {
+                        TorrentEvent::Completed => {
+                            cancel.cancel();
+                            join_set.abort_all();
+                            return Ok(());
+                        },
                     }
                 }
                 else => {
@@ -244,8 +273,12 @@ impl TorrentSession {
                 })
                 .await?;
 
-            let Some(piece_idx) = rx.await? else {
-                break;
+            let piece_idx = match rx.await? {
+                Some(idx) => idx,
+                None => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                },
             };
 
             let piece_len = self.info.pieces[piece_idx].length;

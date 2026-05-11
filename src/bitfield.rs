@@ -1,7 +1,7 @@
 #[derive(Debug, Clone)]
 pub struct BitField {
-    pub bytes: Vec<u8>,
-    pub num_pieces: usize,
+    bytes: Vec<u8>,
+    num_pieces: usize,
 }
 
 impl BitField {
@@ -30,6 +30,7 @@ impl BitField {
         if index >= self.num_pieces {
             return;
         }
+        
         let byte = index / 8;
         let bit = 7 - (index % 8);
         self.bytes[byte] |= 1 << bit;
