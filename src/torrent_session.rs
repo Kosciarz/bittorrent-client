@@ -63,9 +63,7 @@ impl TorrentSession {
 
         let (completed_piece_tx, completed_piece_rx) = mpsc::channel::<CompletedPiece>(32);
         let mut file_writer = FileWriter::new(
-            info.length,
-            info.name.clone(),
-            info.piece_length,
+            Arc::clone(&info),
             completed_piece_rx,
             piece_event_tx.clone(),
             stats_manager_command_tx.clone(),
@@ -290,9 +288,7 @@ impl TorrentSession {
             if let Err(e) = res {
                 let _ = self
                     .piece_event_tx
-                    .send(PieceEvent::DownloadFailed {
-                        piece_index,
-                    })
+                    .send(PieceEvent::DownloadFailed { piece_index })
                     .await;
                 return Err(e);
             }

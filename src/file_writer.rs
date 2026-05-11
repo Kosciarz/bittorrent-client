@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tokio::{
     fs::File,
     io::{self, AsyncSeekExt, AsyncWriteExt},
@@ -6,7 +8,10 @@ use tokio::{
 
 use anyhow::Result;
 
-use crate::{piece::CompletedPiece, piece_picker::PieceEvent, stats_manager::StatsManagerCommand};
+use crate::{
+    piece::CompletedPiece, piece_picker::PieceEvent, stats_manager::StatsManagerCommand,
+    torrent_info::TorrentInfo,
+};
 
 #[derive(Debug)]
 pub struct FileWriter {
@@ -20,9 +25,7 @@ pub struct FileWriter {
 
 impl FileWriter {
     pub async fn new(
-        torrent_length: u64,
-        name: String,
-        piece_length: u32,
+        info: Arc<TorrentInfo>,
         completed_piece_rx: mpsc::Receiver<CompletedPiece>,
         piece_event_tx: mpsc::Sender<PieceEvent>,
         stats_manager_command_tx: mpsc::Sender<StatsManagerCommand>,
@@ -31,13 +34,13 @@ impl FileWriter {
             .create(true)
             .write(true)
             .read(true)
-            .open(name)
+            .open(info.name.clone())
             .await?;
 
-        file.set_len(torrent_length).await?;
+        file.set_len(info.length).await?;
 
         Ok(Self {
-            piece_length,
+            piece_length: info.piece_length,
             file,
             completed_piece_rx,
             piece_event_tx,
