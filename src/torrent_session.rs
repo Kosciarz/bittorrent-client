@@ -1,23 +1,23 @@
 use std::{collections::HashSet, sync::Arc};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use tokio::{
     sync::{
         Mutex,
         mpsc::{self, Sender},
         oneshot,
     },
-    task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     client::Client,
     file_writer::FileWriter,
-    peer::{Peer, PeerConnection},
+    peer::Peer,
+    peer_manager::PeerManager,
     piece::{ActivePiece, CompletedPiece},
-    piece_assembler::PieceValidator,
     piece_picker::{PieceEvent, PiecePicker, PiecePickerCommand},
+    piece_validator::PieceValidator,
     stats_manager::{StatsManager, StatsManagerCommand},
     torrent_info::TorrentInfo,
     tracker::{AnnounceStats, Tracker},
@@ -106,24 +106,38 @@ impl TorrentSession {
     }
 
     pub async fn run(&self, client: &Client) -> Result<()> {
-        let (peer_tx, peer_rx) = mpsc::channel::<Vec<Peer>>(1);
+        let cancellation_token = CancellationToken::new();
 
-        let cancel = CancellationToken::new();
+        let (peer_tx, peer_rx) = mpsc::channel::<Vec<Peer>>(10);
+
+        let mut peer_manager = PeerManager::new(
+            Arc::clone(&self.info),
+            client.clone(),
+            cancellation_token.clone(),
+            peer_rx,
+            self.active_piece_tx.clone(),
+            self.piece_picker_event_tx.clone(),
+            self.piece_event_tx.clone(),
+        );
+        tokio::spawn(async move { peer_manager.run().await });
 
         let announce_task = tokio::spawn({
             let torrent = self.clone();
             let client = client.clone();
-            let cancel = cancel.clone();
+            let cancellation_token = cancellation_token.clone();
 
-            async move { torrent.run_announce_loop(peer_tx, &client, cancel).await }
+            async move {
+                torrent
+                    .run_announce_loop(peer_tx, &client, cancellation_token)
+                    .await
+            }
         });
 
         let download_task = tokio::spawn({
             let mut torrent = self.clone();
-            let client = client.clone();
-            let cancel = cancel.clone();
+            let cancellation_token = cancellation_token.clone();
 
-            async move { torrent.run_download_loop(peer_rx, &client, cancel).await }
+            async move { torrent.run_download_loop(cancellation_token).await }
         });
 
         let (announce_result, download_result) = tokio::join!(announce_task, download_task);
@@ -183,33 +197,15 @@ impl TorrentSession {
         }
     }
 
-    async fn run_download_loop(
-        &mut self,
-        mut peer_rx: mpsc::Receiver<Vec<Peer>>,
-        client: &Client,
-        cancel: CancellationToken,
-    ) -> Result<()> {
-        let mut join_set = JoinSet::new();
-
+    async fn run_download_loop(&mut self, cancel: CancellationToken) -> Result<()> {
         loop {
             let mut torrent_event_rx = self.torrent_event_rx.lock().await;
 
             tokio::select! {
-                Some(peers) = peer_rx.recv() => {
-                    self.process_peers(peers, &mut join_set, client);
-                }
-                Some(res) = join_set.join_next() => {
-                    match res {
-                        Ok(Ok(())) => {},
-                        Ok(Err(e)) => eprintln!("peer connection failed: {e}"),
-                        Err(e) => eprintln!("peer task panicked: {e}"),
-                    }
-                }
                 Some(event) = torrent_event_rx.recv() => {
                     match event {
                         TorrentEvent::Completed => {
                             cancel.cancel();
-                            join_set.abort_all();
                             return Ok(());
                         },
                     }
@@ -219,40 +215,6 @@ impl TorrentSession {
                     bail!("ran out of peers before download completed");
                 },
             }
-        }
-    }
-
-    fn process_peers(&self, peers: Vec<Peer>, join_set: &mut JoinSet<Result<()>>, client: &Client) {
-        for peer in peers {
-            let info = Arc::clone(&self.info);
-            let client = client.clone();
-            let active_piece_tx = self.active_piece_tx.clone();
-            let piece_picker_event_tx = self.piece_picker_event_tx.clone();
-            let piece_event_tx = self.piece_event_tx.clone();
-
-            join_set.spawn(async move {
-                let addr = peer.addr;
-                let mut conn = PeerConnection::connect(
-                    info,
-                    peer,
-                    &client.peer_id,
-                    active_piece_tx,
-                    piece_picker_event_tx,
-                    piece_event_tx,
-                )
-                .await
-                .context(format!("peer {addr} failed"))?;
-
-                conn.send_interested()
-                    .await
-                    .context("failed to send interested")?;
-
-                conn.wait_until_ready()
-                    .await
-                    .context("failed to receive initial messages")?;
-
-                conn.run().await.context("download failed")
-            });
         }
     }
 }
