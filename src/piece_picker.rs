@@ -101,6 +101,8 @@ impl PiecePicker {
     }
 
     pub fn is_finished(&self) -> bool {
-        self.states.iter().all(|state| *state == PieceState::Completed)
+        self.states
+            .iter()
+            .all(|state| *state == PieceState::Completed)
     }
 }

@@ -121,7 +121,7 @@ impl PeerConnection {
             peer_interested: false,
             active_piece_tx,
             piece_picker_event_tx,
-            piece_event_tx
+            piece_event_tx,
         })
     }
 
