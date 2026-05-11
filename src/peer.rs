@@ -4,6 +4,7 @@ use anyhow::{Result, anyhow, bail};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    sync::mpsc,
     time::timeout,
 };
 
@@ -29,6 +30,8 @@ pub struct PeerConnection {
     am_interested: bool,
     peer_choking: bool,
     peer_interested: bool,
+
+    active_piece_tx: mpsc::Sender<ActivePiece>,
 }
 
 impl PeerConnection {
@@ -61,6 +64,7 @@ impl PeerConnection {
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
         num_pieces: usize,
+        active_piece_tx: mpsc::Sender<ActivePiece>,
     ) -> Result<Self> {
         println!("\nTrying peer {}", peer.addr);
 
@@ -105,6 +109,7 @@ impl PeerConnection {
             am_interested: false,
             peer_choking: true,
             peer_interested: false,
+            active_piece_tx,
         })
     }
 
@@ -175,11 +180,7 @@ impl PeerConnection {
         }
     }
 
-    pub async fn download_piece(
-        &mut self,
-        piece_index: usize,
-        piece_length: u32,
-    ) -> Result<ActivePiece> {
+    pub async fn download_piece(&mut self, piece_index: usize, piece_length: u32) -> Result<()> {
         let num_blocks = (piece_length + BLOCK_SIZE - 1) / BLOCK_SIZE;
         let mut piece_buf = vec![0u8; piece_length as usize];
         let mut blocks_received = 0;
@@ -233,11 +234,16 @@ impl PeerConnection {
             }
         }
 
-        return Ok(ActivePiece {
-            index: piece_index,
-            length: piece_length,
-            data: piece_buf,
-        });
+        let _ = self
+            .active_piece_tx
+            .send(ActivePiece {
+                index: piece_index,
+                length: piece_length,
+                data: piece_buf,
+            })
+            .await;
+
+        Ok(())
     }
 
     async fn request_block(

@@ -37,7 +37,7 @@ pub struct TorrentSession {
 
     piece_event_tx: mpsc::Sender<PieceEvent>,
     piece_picker_event_tx: mpsc::Sender<PiecePickerCommand>,
-    piece_tx: mpsc::Sender<ActivePiece>,
+    active_piece_tx: mpsc::Sender<ActivePiece>,
     torrent_event_rx: Arc<Mutex<mpsc::Receiver<TorrentEvent>>>,
     stats_manager_command_tx: mpsc::Sender<StatsManagerCommand>,
 }
@@ -101,7 +101,7 @@ impl TorrentSession {
             tracker_list,
             piece_event_tx,
             piece_picker_event_tx,
-            piece_tx,
+            active_piece_tx: piece_tx,
             torrent_event_rx: Arc::new(Mutex::new(torrent_event_rx)),
             stats_manager_command_tx,
         })
@@ -228,6 +228,7 @@ impl TorrentSession {
         for peer in peers {
             let torrent = self.clone();
             let client = client.clone();
+            let active_piece_tx = self.active_piece_tx.clone();
 
             join_set.spawn(async move {
                 let addr = peer.addr;
@@ -236,6 +237,7 @@ impl TorrentSession {
                     &torrent.info.info_hash,
                     &client.peer_id,
                     torrent.info.pieces.len(),
+                    active_piece_tx,
                 )
                 .await
                 .context(format!("peer {addr} failed"))?;
@@ -267,7 +269,7 @@ impl TorrentSession {
                 })
                 .await?;
 
-            let piece_idx = match rx.await? {
+            let piece_index = match rx.await? {
                 Some(idx) => idx,
                 None => {
                     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -275,32 +277,25 @@ impl TorrentSession {
                 }
             };
 
-            let piece_len = self.info.pieces[piece_idx].length;
+            let piece_len = self.info.pieces[piece_index].length;
 
             let res = tokio::time::timeout(
                 Duration::from_mins(3),
-                conn.download_piece(piece_idx, piece_len),
+                conn.download_piece(piece_index, piece_len),
             )
             .await
             .context("download timed out")
             .flatten();
 
-            let piece = match res {
-                Ok(p) => p,
-                Err(e) => {
-                    let _ = self
-                        .piece_event_tx
-                        .send(PieceEvent::DownloadFailed {
-                            piece_index: piece_idx,
-                        })
-                        .await;
-                    return Err(e);
-                }
-            };
-
-            let _ = self.piece_tx.send(piece.clone()).await;
-
-            println!("Downloaded piece {}", piece.index);
+            if let Err(e) = res {
+                let _ = self
+                    .piece_event_tx
+                    .send(PieceEvent::DownloadFailed {
+                        piece_index,
+                    })
+                    .await;
+                return Err(e);
+            }
         }
     }
 }

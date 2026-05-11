@@ -65,6 +65,8 @@ impl FileWriter {
                     bytes: completed.data.len(),
                 })
                 .await;
+
+            println!("Downloaded piece {}", completed.index);
         }
 
         Ok(())
