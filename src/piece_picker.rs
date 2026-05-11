@@ -102,10 +102,4 @@ impl PiecePicker {
             self.states[index] = PieceState::Missing;
         }
     }
-
-    pub fn is_finished(&self) -> bool {
-        self.states
-            .iter()
-            .all(|state| *state == PieceState::Completed)
-    }
 }
