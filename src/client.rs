@@ -1,7 +1,7 @@
 use std::{env, path::Path, sync::Arc};
 
 use crate::{torrent_info::TorrentInfo, torrent_session::TorrentSession};
-use anyhow::{Result};
+use anyhow::Result;
 use rand::RngExt;
 
 #[derive(Debug, Clone)]

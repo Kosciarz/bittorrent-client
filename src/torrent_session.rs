@@ -1,16 +1,11 @@
-use std::{
-    collections::HashSet,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::Duration,
-};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use tokio::{
     sync::{
-        Mutex, mpsc::{self, Sender}, oneshot
+        Mutex,
+        mpsc::{self, Sender},
+        oneshot,
     },
     task::JoinSet,
 };
@@ -23,16 +18,10 @@ use crate::{
     piece::{ActivePiece, CompletedPiece},
     piece_assembler::PieceValidator,
     piece_picker::{PieceEvent, PiecePicker, PiecePickerCommand},
+    stats_manager::{StatsManager, StatsManagerCommand},
     torrent_info::TorrentInfo,
     tracker::{AnnounceStats, Tracker},
 };
-
-#[derive(Debug)]
-pub struct Stats {
-    pub downloaded: AtomicU64,
-    pub left: AtomicU64,
-    pub uploaded: AtomicU64,
-}
 
 #[derive(Debug)]
 pub enum TorrentEvent {
@@ -42,7 +31,6 @@ pub enum TorrentEvent {
 #[derive(Debug, Clone)]
 pub struct TorrentSession {
     pub info: Arc<TorrentInfo>,
-    stats: Arc<Stats>,
 
     tracker: Arc<Tracker>,
     tracker_list: Vec<Vec<Arc<Tracker>>>,
@@ -51,10 +39,15 @@ pub struct TorrentSession {
     piece_picker_event_tx: mpsc::Sender<PiecePickerCommand>,
     piece_tx: mpsc::Sender<ActivePiece>,
     torrent_event_rx: Arc<Mutex<mpsc::Receiver<TorrentEvent>>>,
+    stats_manager_command_tx: mpsc::Sender<StatsManagerCommand>,
 }
 
 impl TorrentSession {
     pub async fn new(info: Arc<TorrentInfo>) -> Result<Self> {
+        let (stats_manager_command_tx, stats_manager_command_rx) = mpsc::channel(32);
+        let mut stats_manager = StatsManager::new(info.length, stats_manager_command_rx);
+        tokio::spawn(async move { stats_manager.run().await });
+
         let (torrent_event_tx, torrent_event_rx) = mpsc::channel(10);
 
         let (piece_event_tx, piece_event_rx) = mpsc::channel(256);
@@ -75,6 +68,7 @@ impl TorrentSession {
             info.piece_length,
             completed_piece_rx,
             piece_event_tx.clone(),
+            stats_manager_command_tx.clone(),
         )
         .await?;
         tokio::spawn(async move { file_writer.run().await });
@@ -101,21 +95,15 @@ impl TorrentSession {
             tracker_list.push(trackers);
         }
 
-        let stats = Arc::new(Stats {
-            downloaded: 0.into(),
-            left: info.length.into(),
-            uploaded: 0.into(),
-        });
-
         Ok(Self {
             info,
-            stats,
             tracker,
             tracker_list,
             piece_event_tx,
             piece_picker_event_tx,
             piece_tx,
             torrent_event_rx: Arc::new(Mutex::new(torrent_event_rx)),
+            stats_manager_command_tx,
         })
     }
 
@@ -161,17 +149,23 @@ impl TorrentSession {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
+                    let (tx, rx) = oneshot::channel();
+
+                    self.stats_manager_command_tx.send(
+                        StatsManagerCommand::Fetch {
+                            response_tx: tx
+                        }
+                    ).await?;
+
+                    let stats = rx.await?;
+
                     let addrs = self
                         .tracker
                         .announce(
                             &self.info.info_hash,
                             &client.peer_id,
                             client.port,
-                            &AnnounceStats {
-                                uploaded: self.stats.uploaded.load(Ordering::Relaxed),
-                                downloaded: self.stats.downloaded.load(Ordering::Relaxed),
-                                left: self.stats.left.load(Ordering::Relaxed),
-                            },
+                            &AnnounceStats { uploaded: stats.uploaded, downloaded: stats.downloaded, left: stats.left },
                         )
                         .await?;
 
@@ -278,7 +272,7 @@ impl TorrentSession {
                 None => {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     continue;
-                },
+                }
             };
 
             let piece_len = self.info.pieces[piece_idx].length;
@@ -306,16 +300,7 @@ impl TorrentSession {
 
             let _ = self.piece_tx.send(piece.clone()).await;
 
-            self.stats
-                .downloaded
-                .fetch_add(piece.length as u64, Ordering::Relaxed);
-            self.stats
-                .left
-                .fetch_sub(piece.length as u64, Ordering::Relaxed);
-
             println!("Downloaded piece {}", piece.index);
         }
-
-        Ok(())
     }
 }

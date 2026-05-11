@@ -1,16 +1,17 @@
 use anyhow::Result;
 
 mod bencode;
+mod bitfield;
 mod client;
 mod file_writer;
 mod peer;
 mod piece;
-mod piece_picker;
 mod piece_assembler;
+mod piece_picker;
+mod stats_manager;
 mod torrent_info;
 mod torrent_session;
 mod tracker;
-mod bitfield;
 
 #[tokio::main]
 async fn main() -> Result<()> {

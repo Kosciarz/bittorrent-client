@@ -63,10 +63,7 @@ impl Object {
         );
         dict.insert(
             b"creation date".to_vec(),
-            Object::new(
-                ObjectType::Number(torrent.creation_date as i64),
-                Vec::new(),
-            ),
+            Object::new(ObjectType::Number(torrent.creation_date as i64), Vec::new()),
         );
         dict.insert(
             b"info".to_vec(),
@@ -113,10 +110,7 @@ fn convert_info_dictionary(torrent: &TorrentInfo) -> ObjectType {
 
     dict.insert(
         b"piece length".to_vec(),
-        Object::new(
-            ObjectType::Number(torrent.piece_length as i64),
-            Vec::new(),
-        ),
+        Object::new(ObjectType::Number(torrent.piece_length as i64), Vec::new()),
     );
 
     let mut piece_hashes_bytes: Vec<u8> = Vec::with_capacity(torrent.piece_hashes().len() * 20);

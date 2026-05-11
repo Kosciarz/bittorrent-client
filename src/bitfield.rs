@@ -30,7 +30,7 @@ impl BitField {
         if index >= self.num_pieces {
             return;
         }
-        
+
         let byte = index / 8;
         let bit = 7 - (index % 8);
         self.bytes[byte] |= 1 << bit;

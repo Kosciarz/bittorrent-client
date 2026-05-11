@@ -30,7 +30,7 @@ pub struct PiecePicker {
     completed: usize,
 
     piece_event_rx: mpsc::Receiver<PieceEvent>,
-    piece_picker_event_rx: mpsc::Receiver<PiecePickerCommand>,
+    piece_picker_command_rx: mpsc::Receiver<PiecePickerCommand>,
     torrent_event_tx: mpsc::Sender<TorrentEvent>,
 }
 
@@ -38,14 +38,14 @@ impl PiecePicker {
     pub fn new(
         num_pieces: usize,
         piece_event_rx: mpsc::Receiver<PieceEvent>,
-        piece_picker_event_rx: mpsc::Receiver<PiecePickerCommand>,
+        piece_picker_command_rx: mpsc::Receiver<PiecePickerCommand>,
         torrent_event_tx: mpsc::Sender<TorrentEvent>,
     ) -> Self {
         Self {
             states: vec![PieceState::Missing; num_pieces],
             completed: 0,
             piece_event_rx,
-            piece_picker_event_rx,
+            piece_picker_command_rx,
             torrent_event_tx,
         }
     }
@@ -69,8 +69,8 @@ impl PiecePicker {
                         },
                     }
                 }
-                Some(event) = self.piece_picker_event_rx.recv() => {
-                    match event {
+                Some(cmd) = self.piece_picker_command_rx.recv() => {
+                    match cmd {
                         PiecePickerCommand::RequestPiece { bitfield, response_tx } =>{
                             let idx = self.claim_piece(&bitfield);
                             let _ = response_tx.send(idx);

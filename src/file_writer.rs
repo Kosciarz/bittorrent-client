@@ -6,7 +6,7 @@ use tokio::{
 
 use anyhow::Result;
 
-use crate::{piece::CompletedPiece, piece_picker::PieceEvent};
+use crate::{piece::CompletedPiece, piece_picker::PieceEvent, stats_manager::StatsManagerCommand};
 
 #[derive(Debug)]
 pub struct FileWriter {
@@ -15,6 +15,7 @@ pub struct FileWriter {
     file: File,
     completed_piece_rx: mpsc::Receiver<CompletedPiece>,
     piece_event_tx: mpsc::Sender<PieceEvent>,
+    stats_manager_command_tx: mpsc::Sender<StatsManagerCommand>,
 }
 
 impl FileWriter {
@@ -24,6 +25,7 @@ impl FileWriter {
         piece_length: u32,
         completed_piece_rx: mpsc::Receiver<CompletedPiece>,
         piece_event_tx: mpsc::Sender<PieceEvent>,
+        stats_manager_command_tx: mpsc::Sender<StatsManagerCommand>,
     ) -> Result<Self> {
         let file = File::options()
             .create(true)
@@ -39,6 +41,7 @@ impl FileWriter {
             file,
             completed_piece_rx,
             piece_event_tx,
+            stats_manager_command_tx,
         })
     }
 
@@ -50,7 +53,19 @@ impl FileWriter {
             self.file.write_all(&completed.data).await?;
             self.file.flush().await?;
 
-            let _ = self.piece_event_tx.send(PieceEvent::Completed { piece_index: completed.index }).await;
+            let _ = self
+                .piece_event_tx
+                .send(PieceEvent::Completed {
+                    piece_index: completed.index,
+                })
+                .await;
+
+            let _ = self
+                .stats_manager_command_tx
+                .send(StatsManagerCommand::UpdateDownloaded {
+                    bytes: completed.data.len(),
+                })
+                .await;
         }
 
         Ok(())
