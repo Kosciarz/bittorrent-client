@@ -33,7 +33,7 @@ pub struct TorrentSession {
 impl TorrentSession {
     pub async fn new(info: Arc<TorrentInfo>, client: &Client) -> Result<Self> {
         let (stats_manager_command_tx, stats_manager_command_rx) = mpsc::channel(32);
-        let mut stats_manager = StatsManager::new(info.length, stats_manager_command_rx);
+        let mut stats_manager = StatsManager::new(info.total_length, stats_manager_command_rx);
         tokio::spawn(async move { stats_manager.run().await });
 
         let (torrent_event_tx, torrent_event_rx) = mpsc::channel(10);

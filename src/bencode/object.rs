@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::torrent_info::TorrentInfo;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 
 #[derive(Debug)]
 pub enum ObjectType {
@@ -33,7 +33,7 @@ impl Object {
 }
 
 impl Object {
-    pub fn from_torrent(torrent: &TorrentInfo) -> Self {
+    pub fn from_torrent(torrent: &TorrentInfo) -> Result<Self> {
         let mut dict = BTreeMap::new();
 
         dict.insert(
@@ -67,10 +67,10 @@ impl Object {
         );
         dict.insert(
             b"info".to_vec(),
-            Object::new(convert_info_dictionary(torrent), Vec::new()),
+            Object::new(convert_info_dictionary(torrent)?, Vec::new()),
         );
 
-        Object::new(ObjectType::Dictionary(dict), Vec::new())
+        Ok(Object::new(ObjectType::Dictionary(dict), Vec::new()))
     }
 }
 
@@ -93,20 +93,69 @@ fn convert_announce_list(torrent: &TorrentInfo) -> ObjectType {
     ObjectType::List(announce_list)
 }
 
-fn convert_info_dictionary(torrent: &TorrentInfo) -> ObjectType {
+fn convert_info_dictionary(torrent: &TorrentInfo) -> Result<ObjectType> {
     let mut dict = BTreeMap::new();
 
-    dict.insert(
-        b"length".to_vec(),
-        Object::new(ObjectType::Number(torrent.total_length as i64), Vec::new()),
-    );
-    dict.insert(
-        b"name".to_vec(),
-        Object::new(
-            ObjectType::ByteArray(torrent.name.as_bytes().to_vec()),
-            Vec::new(),
-        ),
-    );
+    if torrent.files.len() == 1 {
+        dict.insert(
+            b"length".to_vec(),
+            Object::new(ObjectType::Number(torrent.total_length as i64), Vec::new()),
+        );
+        dict.insert(
+            b"name".to_vec(),
+            Object::new(
+                ObjectType::ByteArray(torrent.name.as_bytes().to_vec()),
+                Vec::new(),
+            ),
+        );
+    } else {
+        let mut files = Vec::new();
+
+        for file in &torrent.files {
+            let mut path_components = Vec::new();
+
+            for component in file.path.iter().skip(1) {
+                let component = component
+                    .to_str()
+                    .ok_or_else(|| anyhow!("path component is not valid UTF-8"))?;
+
+                path_components.push(Object::new(
+                    ObjectType::ByteArray(component.as_bytes().to_vec()),
+                    Vec::new(),
+                ));
+            }
+
+            let mut file_dict = BTreeMap::new();
+
+            file_dict.insert(
+                b"length".to_vec(),
+                Object::new(
+                    ObjectType::Number(file.length.try_into().context("file length too large")?),
+                    Vec::new(),
+                ),
+            );
+
+            file_dict.insert(
+                b"path".to_vec(),
+                Object::new(ObjectType::List(path_components), Vec::new()),
+            );
+
+            files.push(Object::new(ObjectType::Dictionary(file_dict), Vec::new()));
+        }
+
+        dict.insert(
+            b"files".to_vec(),
+            Object::new(ObjectType::List(files), Vec::new()),
+        );
+
+        dict.insert(
+            b"name".to_vec(),
+            Object::new(
+                ObjectType::ByteArray(torrent.name.as_bytes().to_vec()),
+                Vec::new(),
+            ),
+        );
+    }
 
     dict.insert(
         b"piece length".to_vec(),
@@ -123,7 +172,7 @@ fn convert_info_dictionary(torrent: &TorrentInfo) -> ObjectType {
         Object::new(ObjectType::ByteArray(piece_hashes_bytes), Vec::new()),
     );
 
-    ObjectType::Dictionary(dict)
+    Ok(ObjectType::Dictionary(dict))
 }
 
 fn get_value<'a>(dict: &'a BTreeMap<Vec<u8>, Object>, key: &[u8]) -> Result<&'a Object> {

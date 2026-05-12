@@ -1,7 +1,6 @@
 use std::{
     collections::BTreeMap,
     fs::{self},
-    io,
     path::{Path, PathBuf},
 };
 
@@ -53,8 +52,8 @@ impl TorrentInfo {
         TorrentInfo::from_object(obj).await
     }
 
-    pub async fn save_to_file(&self, path: &Path) -> io::Result<()> {
-        let obj = Object::from_torrent(self);
+    pub async fn save_to_file(&self, path: &Path) -> Result<()> {
+        let obj = Object::from_torrent(self)?;
         let bytes = bencode::encode_object(&obj);
         tokio::fs::write(path.join(format!("{}.torrent", self.name)), bytes).await?;
         Ok(())
