@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, fs, io, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs::{self},
+    io,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use sha1::{Digest, Sha1};
@@ -13,10 +18,18 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
+pub struct FileItem {
+    pub length: u64,
+    pub offset: u64,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
 pub struct TorrentInfo {
     // core download fields
-    pub length: u64,
+    pub total_length: u64,
     pub info_hash: [u8; 20],
+    pub files: Vec<FileItem>,
     pub piece_length: u32,
     pub pieces: Vec<PieceInfo>,
 
@@ -43,15 +56,7 @@ impl TorrentInfo {
     pub async fn save_to_file(&self, path: &Path) -> io::Result<()> {
         let obj = Object::from_torrent(self);
         let bytes = bencode::encode_object(&obj);
-        tokio::fs::write(
-            format!(
-                "{}/{}.torrent",
-                path.to_string_lossy().to_string(),
-                self.name
-            ),
-            bytes,
-        )
-        .await?;
+        tokio::fs::write(path.join(format!("{}.torrent", self.name)), bytes).await?;
         Ok(())
     }
 
@@ -70,23 +75,27 @@ impl TorrentInfo {
             .map_err(|_| anyhow!("creation date is negative or too large"))?;
 
         let info_obj = extract_dict(&dict, b"info")?;
-        let name = extract_str(&info_obj, b"name")?;
-        let total_length = u64::try_from(extract_num(&info_obj, b"length")?)
-            .map_err(|_| anyhow!("length is negative or too large"))?;
+
+        let (files, name) = extract_files(&info_obj)?;
+
         let piece_length = u32::try_from(extract_num(&info_obj, b"piece length")?)
             .map_err(|_| anyhow!("piece length is negative or too large"))?;
         let piece_hashes = extract_pieces(&info_obj)?;
 
         let info_hash = compute_info_hash(&dict)?;
 
+        let total_length = files.iter().map(|file| file.length).sum();
+
         let mut pieces = Vec::with_capacity(piece_hashes.len());
+
         for (i, hash) in piece_hashes.iter().enumerate() {
             let length = if i == piece_hashes.len() - 1 {
                 let last_piece_length = total_length - ((piece_length as u64) * (i as u64));
-                assert!(
-                    last_piece_length > 0 && last_piece_length <= piece_length as u64,
-                    "last piece length {last_piece_length} is out of range"
-                );
+
+                if last_piece_length == 0 || last_piece_length > piece_length as u64 {
+                    bail!("last piece length {last_piece_length} is out of range");
+                }
+
                 last_piece_length as u32
             } else {
                 piece_length as u32
@@ -100,13 +109,14 @@ impl TorrentInfo {
         }
 
         Ok(TorrentInfo {
+            total_length,
             info_hash,
-            pieces: pieces.clone(),
+            files,
             piece_length,
-            length: total_length,
-            name,
+            pieces,
             announce,
             announce_list,
+            name,
             comment,
             created_by,
             creation_date,
@@ -141,6 +151,68 @@ fn extract_announce_list(dict: &BTreeMap<Vec<u8>, Object>) -> Result<Vec<Vec<Url
     }
 
     Ok(announce_list)
+}
+
+fn extract_files(info_dict: &BTreeMap<Vec<u8>, Object>) -> Result<(Vec<FileItem>, String)> {
+    if let Ok(file_list) = extract_list(&info_dict, b"files") {
+        let dir_name = extract_str(info_dict, b"name")?;
+
+        let mut file_items = Vec::with_capacity(file_list.len());
+        let mut offset = 0;
+
+        for obj in file_list {
+            match obj.object_type() {
+                ObjectType::Dictionary(file) => {
+                    let length = u64::try_from(extract_num(&file, b"length")?)
+                        .map_err(|_| anyhow!("length is negative or too large"))?;
+                    let path_components = extract_list(&file, b"path")?;
+
+                    let mut path = PathBuf::from(&dir_name);
+                    for obj in path_components {
+                        match obj.object_type() {
+                            ObjectType::ByteArray(b) => {
+                                let component = String::from_utf8(b.to_vec())
+                                    .context("path component is not valid utf-8")?;
+
+                                if component == ".."
+                                    || component.contains('/')
+                                    || component.contains('\\')
+                                {
+                                    bail!("invalid path component: {component}");
+                                }
+
+                                path.push(component);
+                            }
+                            _ => bail!("expected obj to be of type byte array"),
+                        }
+                    }
+
+                    file_items.push(FileItem {
+                        length,
+                        offset,
+                        path,
+                    });
+
+                    offset += length;
+                }
+                _ => bail!("expected obj to be of type dictionary"),
+            }
+        }
+
+        Ok((file_items, dir_name))
+    } else {
+        let path = extract_str(&info_dict, b"name")?;
+        let length = u64::try_from(extract_num(&info_dict, b"length")?)
+            .map_err(|_| anyhow!("length is negative or too large"))?;
+
+        let file_items = vec![FileItem {
+            length,
+            offset: 0,
+            path: PathBuf::from(&path),
+        }];
+
+        Ok((file_items, path))
+    }
 }
 
 fn compute_info_hash(dict: &BTreeMap<Vec<u8>, Object>) -> Result<[u8; 20]> {

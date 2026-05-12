@@ -98,7 +98,7 @@ fn convert_info_dictionary(torrent: &TorrentInfo) -> ObjectType {
 
     dict.insert(
         b"length".to_vec(),
-        Object::new(ObjectType::Number(torrent.length as i64), Vec::new()),
+        Object::new(ObjectType::Number(torrent.total_length as i64), Vec::new()),
     );
     dict.insert(
         b"name".to_vec(),
