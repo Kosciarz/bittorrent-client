@@ -96,14 +96,6 @@ impl PeerManager {
                 .await
                 .context(format!("peer {addr} failed"))?;
 
-                conn.send_interested()
-                    .await
-                    .context("failed to send interested")?;
-
-                conn.wait_until_ready()
-                    .await
-                    .context("failed to receive initial messages")?;
-
                 conn.run().await.context("download failed")
             });
         }

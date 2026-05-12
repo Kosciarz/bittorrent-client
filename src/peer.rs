@@ -79,27 +79,16 @@ impl PeerConnection {
         }
 
         let mut buf = [0u8; HANDSHAKE_SIZE];
-        if let Err(e) = stream.read_exact(&mut buf).await {
-            bail!("failed to read handshake: {e}");
-        }
+        stream
+            .read_exact(&mut buf)
+            .await
+            .context("failed to read handshake")?;
 
-        if buf[0] != 19 {
-            bail!("invalid pstrlen");
-        }
-
-        if &buf[1..20] != b"BitTorrent protocol" {
-            bail!("invalid pstr");
-        }
-
-        if &buf[28..48] != info.info_hash {
-            bail!("info hash does not match");
-        }
-
-        println!("Connected to peer: {}", peer.addr);
+        Self::verify_handshake(&buf, &info.info_hash).context("failed to verify peer's handshake")?;
 
         let num_pieces = info.pieces.len();
 
-        Ok(PeerConnection {
+        let mut conn = PeerConnection {
             info,
             peer,
             stream,
@@ -112,7 +101,19 @@ impl PeerConnection {
             active_piece_tx,
             piece_picker_event_tx,
             piece_event_tx,
-        })
+        };
+
+        conn.send_interested()
+            .await
+            .context("failed to send interested")?;
+
+        conn.wait_until_ready()
+            .await
+            .context("failed to receive initial messages")?;
+
+        println!("Connected to peer: {}", conn.peer.addr);
+
+        Ok(conn)
     }
 
     fn build_handshake(info_hash: &[u8], client_id: &[u8]) -> Vec<u8> {
@@ -127,11 +128,27 @@ impl PeerConnection {
         handshake
     }
 
-    pub async fn send_message(&mut self, message: Message) -> Result<()> {
+    fn verify_handshake(handshake: &[u8], info_hash: &[u8]) -> Result<()> {
+        if handshake[0] != 19 {
+            bail!("invalid pstrlen");
+        }
+
+        if &handshake[1..20] != b"BitTorrent protocol" {
+            bail!("invalid pstr");
+        }
+
+        if &handshake[28..48] != info_hash {
+            bail!("info hash does not match");
+        }
+
+        Ok(())
+    }
+
+    async fn send_message(&mut self, message: Message) -> Result<()> {
         Ok(self.stream.write_all(&message.encode()).await?)
     }
 
-    pub async fn read_message(&mut self) -> Result<Message> {
+    async fn read_message(&mut self) -> Result<Message> {
         let mut len_buf = [0u8; 4];
         self.stream.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf);
