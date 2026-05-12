@@ -115,45 +115,6 @@ impl PeerConnection {
         })
     }
 
-    pub async fn run(&mut self) -> Result<()> {
-        loop {
-            let (tx, rx) = oneshot::channel();
-
-            self.piece_picker_event_tx
-                .send(PiecePickerCommand::RequestPiece {
-                    bitfield: self.bitfield().clone(),
-                    response_tx: tx,
-                })
-                .await?;
-
-            let piece_index = match rx.await? {
-                Some(idx) => idx,
-                None => {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
-            };
-
-            let piece_len = self.info.pieces[piece_index].length;
-
-            let res = tokio::time::timeout(
-                Duration::from_mins(3),
-                self.download_piece(piece_index, piece_len),
-            )
-            .await
-            .context("download timed out")
-            .flatten();
-
-            if let Err(e) = res {
-                let _ = self
-                    .piece_event_tx
-                    .send(PieceEvent::DownloadFailed { piece_index })
-                    .await;
-                return Err(e);
-            }
-        }
-    }
-
     fn build_handshake(info_hash: &[u8], client_id: &[u8]) -> Vec<u8> {
         let mut handshake = Vec::with_capacity(HANDSHAKE_SIZE);
 
@@ -199,14 +160,57 @@ impl PeerConnection {
         }
     }
 
+    pub async fn run(&mut self) -> Result<()> {
+        loop {
+            let (tx, rx) = oneshot::channel();
+
+            self.piece_picker_event_tx
+                .send(PiecePickerCommand::RequestPiece {
+                    bitfield: self.bitfield().clone(),
+                    response_tx: tx,
+                })
+                .await?;
+
+            let piece_index = match rx.await? {
+                Some(idx) => idx,
+                None => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+
+            let piece_len = self.info.pieces[piece_index].length;
+
+            let res = tokio::time::timeout(
+                Duration::from_mins(3),
+                self.download_piece(piece_index, piece_len),
+            )
+            .await
+            .context("download timed out")
+            .flatten();
+
+            if let Err(e) = res {
+                let _ = self
+                    .piece_event_tx
+                    .send(PieceEvent::DownloadFailed { piece_index })
+                    .await;
+                return Err(e);
+            }
+        }
+    }
+
     pub async fn download_piece(&mut self, piece_index: usize, piece_length: u32) -> Result<()> {
         let num_blocks = (piece_length + BLOCK_SIZE - 1) / BLOCK_SIZE;
         let mut piece_buf = vec![0u8; piece_length as usize];
+
+        let queue_size = 5;
+        let mut next_request = 0;
         let mut blocks_received = 0;
 
-        for block in 0..num_blocks {
-            self.request_block(block as usize, piece_index, piece_length)
+        while next_request < queue_size.min(num_blocks) {
+            self.request_block(next_request as usize, piece_index, piece_length)
                 .await?;
+            next_request += 1;
         }
 
         while blocks_received < num_blocks {
@@ -224,6 +228,12 @@ impl PeerConnection {
                 piece_buf[(block.begin as usize)..(block.begin as usize + block.block.len())]
                     .copy_from_slice(&block.block);
                 blocks_received += 1;
+
+                if next_request < num_blocks {
+                    self.request_block(next_request as usize, piece_index, piece_length)
+                        .await?;
+                    next_request += 1;
+                }
             }
         }
 
