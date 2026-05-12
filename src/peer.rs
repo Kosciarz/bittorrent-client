@@ -5,7 +5,6 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::{mpsc, oneshot},
-    time::timeout,
 };
 
 use crate::{
@@ -66,13 +65,47 @@ impl PeerConnection {
     ) -> Result<Self> {
         println!("\nTrying peer {}", peer.addr);
 
-        let mut stream = match timeout(Duration::from_secs(5), TcpStream::connect(&peer.addr)).await
+        let stream = match tokio::time::timeout(
+            Duration::from_secs(5),
+            TcpStream::connect(&peer.addr),
+        )
+        .await
         {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => bail!("connection failed: {e}"),
             Err(_) => bail!("connection timed out"),
         };
 
+        let conn = tokio::time::timeout(
+            Duration::from_secs(30),
+            Self::connect_inner(
+                stream,
+                info,
+                peer,
+                peer_id,
+                active_piece_tx,
+                piece_picker_event_tx,
+                piece_event_tx,
+            ),
+        )
+        .await
+        .context("connection timed out")
+        .flatten()?;
+
+        println!("Connected to peer: {}", conn.peer.addr);
+
+        Ok(conn)
+    }
+
+    async fn connect_inner(
+        mut stream: TcpStream,
+        info: Arc<TorrentInfo>,
+        peer: Peer,
+        peer_id: &[u8; 20],
+        active_piece_tx: mpsc::Sender<ActivePiece>,
+        piece_picker_event_tx: mpsc::Sender<PiecePickerCommand>,
+        piece_event_tx: mpsc::Sender<PieceEvent>,
+    ) -> Result<PeerConnection> {
         let handshake = &Self::build_handshake(&info.info_hash, peer_id);
         if let Err(e) = stream.write_all(handshake).await {
             bail!("failed to send handshake: {e}");
@@ -84,7 +117,8 @@ impl PeerConnection {
             .await
             .context("failed to read handshake")?;
 
-        Self::verify_handshake(&buf, &info.info_hash).context("failed to verify peer's handshake")?;
+        Self::verify_handshake(&buf, &info.info_hash)
+            .context("failed to verify peer's handshake")?;
 
         let num_pieces = info.pieces.len();
 
@@ -92,7 +126,9 @@ impl PeerConnection {
             info,
             peer,
             stream,
-            peer_id: buf[48..68].try_into().unwrap(),
+            peer_id: buf[48..68]
+                .try_into()
+                .expect("peer id slice is always 20 bytes"),
             bitfield: BitField::empty(num_pieces),
             am_choking: true,
             am_interested: false,
@@ -110,8 +146,6 @@ impl PeerConnection {
         conn.wait_until_ready()
             .await
             .context("failed to receive initial messages")?;
-
-        println!("Connected to peer: {}", conn.peer.addr);
 
         Ok(conn)
     }
