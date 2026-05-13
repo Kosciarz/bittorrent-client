@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use tokio::{
-    fs::File,
+    fs::{self},
     io::{self, AsyncSeekExt, AsyncWriteExt},
     sync::mpsc,
 };
@@ -15,9 +15,9 @@ use crate::{
 
 #[derive(Debug)]
 pub struct FileWriter {
-    piece_length: u32,
+    info: Arc<TorrentInfo>,
 
-    file: File,
+    files: Vec<fs::File>,
     completed_piece_rx: mpsc::Receiver<CompletedPiece>,
     piece_event_tx: mpsc::Sender<PieceEvent>,
     stats_manager_command_tx: mpsc::Sender<StatsManagerCommand>,
@@ -30,18 +30,28 @@ impl FileWriter {
         piece_event_tx: mpsc::Sender<PieceEvent>,
         stats_manager_command_tx: mpsc::Sender<StatsManagerCommand>,
     ) -> Result<Self> {
-        let file = File::options()
-            .create(true)
-            .write(true)
-            .read(true)
-            .open(info.name.clone())
-            .await?;
+        let mut files = Vec::with_capacity(info.files.len());
 
-        file.set_len(info.length).await?;
+        for file_item in &info.files {
+            if let Some(parent) = file_item.path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+
+            let file_handle = fs::File::options()
+                .create(true)
+                .write(true)
+                .read(true)
+                .open(&file_item.path)
+                .await?;
+
+            file_handle.set_len(file_item.length).await?;
+
+            files.push(file_handle);
+        }
 
         Ok(Self {
-            piece_length: info.piece_length,
-            file,
+            info,
+            files,
             completed_piece_rx,
             piece_event_tx,
             stats_manager_command_tx,
@@ -50,10 +60,33 @@ impl FileWriter {
 
     pub async fn run(&mut self) -> Result<()> {
         while let Some(completed) = self.completed_piece_rx.recv().await {
-            let offset = (completed.index as u64) * (self.piece_length as u64);
-            self.file.seek(io::SeekFrom::Start(offset)).await?;
+            let total_offset = (completed.index as u64) * (self.info.piece_length as u64);
+            let mut remaining_data = completed.data.as_slice();
+            let mut current_offset = total_offset;
 
-            self.file.write_all(&completed.data).await?;
+            for i in 0..self.files.len() {
+                let file = &self.info.files[i];
+
+                if current_offset >= file.offset + file.length {
+                    continue;
+                }
+
+                let file_offset = current_offset - self.info.files[i].offset;
+                let space_in_file = file.length - file_offset;
+                let write_len = remaining_data.len().min(space_in_file as usize);
+
+                self.files[i].seek(io::SeekFrom::Start(file_offset)).await?;
+                self.files[i]
+                    .write_all(&remaining_data[..write_len])
+                    .await?;
+
+                remaining_data = &remaining_data[write_len..];
+                current_offset += write_len as u64;
+
+                if remaining_data.is_empty() {
+                    break;
+                }
+            }
 
             let _ = self
                 .piece_event_tx
