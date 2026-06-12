@@ -63,7 +63,7 @@ impl PeerConnection {
         piece_picker_event_tx: mpsc::Sender<PiecePickerCommand>,
         piece_event_tx: mpsc::Sender<PieceEvent>,
     ) -> Result<Self> {
-        println!("\nTrying peer {}", peer.addr);
+        // println!("\nTrying peer {}", peer.addr);
 
         let stream = match tokio::time::timeout(
             Duration::from_secs(5),
@@ -92,7 +92,7 @@ impl PeerConnection {
         .context("connection timed out")
         .flatten()?;
 
-        println!("Connected to peer: {}", conn.peer.addr);
+        // println!("Connected to peer: {}", conn.peer.addr);
 
         Ok(conn)
     }

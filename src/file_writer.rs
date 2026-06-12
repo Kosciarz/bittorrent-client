@@ -102,7 +102,7 @@ impl FileWriter {
                 })
                 .await;
 
-            println!("Downloaded piece {}", completed.index);
+            // println!("Downloaded piece {}", completed.index);
         }
 
         Ok(())

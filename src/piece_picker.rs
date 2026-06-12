@@ -1,6 +1,6 @@
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{bitfield::BitField, torrent_session::TorrentEvent};
+use crate::{bitfield::BitField, progress_displayer::ProgressEvent, torrent_session::TorrentEvent};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PieceState {
@@ -31,6 +31,7 @@ pub struct PiecePicker {
     piece_event_rx: mpsc::Receiver<PieceEvent>,
     piece_picker_command_rx: mpsc::Receiver<PiecePickerCommand>,
     torrent_event_tx: mpsc::Sender<TorrentEvent>,
+    progress_event_tx: mpsc::Sender<ProgressEvent>,
 }
 
 impl PiecePicker {
@@ -39,12 +40,14 @@ impl PiecePicker {
         piece_event_rx: mpsc::Receiver<PieceEvent>,
         piece_picker_command_rx: mpsc::Receiver<PiecePickerCommand>,
         torrent_event_tx: mpsc::Sender<TorrentEvent>,
+        progress_event_tx: mpsc::Sender<ProgressEvent>,
     ) -> Self {
         Self {
             states: vec![PieceState::Missing; num_pieces],
             piece_event_rx,
             piece_picker_command_rx,
             torrent_event_tx,
+            progress_event_tx,
         }
     }
 
@@ -64,6 +67,8 @@ impl PiecePicker {
                                 let _ = self.torrent_event_tx.send(TorrentEvent::Completed).await;
                                 return;
                             }
+
+                            let _ = self.progress_event_tx.send(ProgressEvent::PieceCompleted).await;
                         },
                     }
                 }

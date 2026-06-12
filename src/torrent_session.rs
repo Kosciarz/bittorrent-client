@@ -12,6 +12,7 @@ use crate::{
     piece::{ActivePiece, CompletedPiece},
     piece_picker::PiecePicker,
     piece_validator::PieceValidator,
+    progress_displayer::ProgressDisplayer,
     stats_manager::StatsManager,
     torrent_info::TorrentInfo,
     tracker_manager::TrackerManager,
@@ -40,12 +41,17 @@ impl TorrentSession {
 
         let (piece_event_tx, piece_event_rx) = mpsc::channel(256);
 
+        let (progress_event_tx, progress_event_rx) = mpsc::channel(32);
+        let mut progress_displayer = ProgressDisplayer::new(Arc::clone(&info), progress_event_rx);
+        tokio::spawn(async move { progress_displayer.run().await });
+
         let (piece_picker_event_tx, piece_picker_event_rx) = mpsc::channel(32);
         let mut piece_picker = PiecePicker::new(
             info.pieces.len(),
             piece_event_rx,
             piece_picker_event_rx,
             torrent_event_tx,
+            progress_event_tx,
         );
         tokio::spawn(async move { piece_picker.run().await });
 

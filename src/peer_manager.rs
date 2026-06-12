@@ -57,11 +57,11 @@ impl PeerManager {
                     self.process_peers(peers);
                 }
                 Some(res) = self.join_set.join_next() => {
-                    match res {
-                        Ok(Ok(())) => {},
-                        Ok(Err(e)) => eprintln!("peer connection failed: {e}"),
-                        Err(e) => eprintln!("peer task panicked: {e}"),
-                    }
+                    // match res {
+                    //     Ok(Ok(())) => {},
+                    //     Ok(Err(e)) => eprintln!("peer connection failed: {e}"),
+                    //     Err(e) => eprintln!("peer task panicked: {e}"),
+                    // }
                 }
                 _ = self.cancellation_token.cancelled() => {
                     self.join_set.abort_all();

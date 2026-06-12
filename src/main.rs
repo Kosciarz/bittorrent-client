@@ -9,6 +9,7 @@ mod peer_manager;
 mod piece;
 mod piece_picker;
 mod piece_validator;
+mod progress_displayer;
 mod stats_manager;
 mod torrent_info;
 mod torrent_session;
