@@ -76,7 +76,7 @@ impl TorrentSession {
 
         let cancellation_token = CancellationToken::new();
 
-        let (peer_tx, peer_rx) = mpsc::channel::<Vec<Peer>>(10);
+        let (peer_tx, peer_rx) = mpsc::channel::<Peer>(32);
 
         let mut tracker_manager = TrackerManager::new(
             Arc::clone(&info),

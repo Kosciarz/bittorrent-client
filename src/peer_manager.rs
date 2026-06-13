@@ -21,7 +21,7 @@ pub struct PeerManager {
     join_set: JoinSet<Result<()>>,
     address_set: HashSet<SocketAddr>,
 
-    peer_rx: mpsc::Receiver<Vec<Peer>>,
+    peer_rx: mpsc::Receiver<Peer>,
     active_piece_tx: mpsc::Sender<ActivePiece>,
     piece_picker_event_tx: mpsc::Sender<PiecePickerCommand>,
     piece_event_tx: mpsc::Sender<PieceEvent>,
@@ -32,7 +32,7 @@ impl PeerManager {
         info: Arc<TorrentInfo>,
         client: Client,
         cancellation_token: CancellationToken,
-        peer_rx: mpsc::Receiver<Vec<Peer>>,
+        peer_rx: mpsc::Receiver<Peer>,
         active_piece_tx: mpsc::Sender<ActivePiece>,
         piece_picker_event_tx: mpsc::Sender<PiecePickerCommand>,
         piece_event_tx: mpsc::Sender<PieceEvent>,
@@ -53,8 +53,8 @@ impl PeerManager {
     pub async fn run(&mut self) {
         loop {
             tokio::select! {
-                Some(peers) = self.peer_rx.recv() => {
-                    self.process_peers(peers);
+                Some(peer) = self.peer_rx.recv() => {
+                    self.process_peers(peer);
                 }
                 Some(res) = self.join_set.join_next() => {
                     // match res {
@@ -71,33 +71,31 @@ impl PeerManager {
         }
     }
 
-    fn process_peers(&mut self, peers: Vec<Peer>) {
-        for peer in peers {
-            if !self.address_set.insert(peer.addr) {
-                continue;
-            }
-
-            let info = Arc::clone(&self.info);
-            let client = self.client.clone();
-            let active_piece_tx = self.active_piece_tx.clone();
-            let piece_picker_event_tx = self.piece_picker_event_tx.clone();
-            let piece_event_tx = self.piece_event_tx.clone();
-
-            self.join_set.spawn(async move {
-                let addr = peer.addr;
-                let mut conn = PeerConnection::connect(
-                    info,
-                    peer,
-                    &client.peer_id,
-                    active_piece_tx,
-                    piece_picker_event_tx,
-                    piece_event_tx,
-                )
-                .await
-                .context(format!("peer {addr} failed"))?;
-
-                conn.run().await.context("download failed")
-            });
+    fn process_peers(&mut self, peer: Peer) {
+        if !self.address_set.insert(peer.addr) {
+            return;
         }
+
+        let info = Arc::clone(&self.info);
+        let client = self.client.clone();
+        let active_piece_tx = self.active_piece_tx.clone();
+        let piece_picker_event_tx = self.piece_picker_event_tx.clone();
+        let piece_event_tx = self.piece_event_tx.clone();
+
+        self.join_set.spawn(async move {
+            let addr = peer.addr;
+            let mut conn = PeerConnection::connect(
+                info,
+                peer,
+                &client.peer_id,
+                active_piece_tx,
+                piece_picker_event_tx,
+                piece_event_tx,
+            )
+            .await
+            .context(format!("peer {addr} failed"))?;
+
+            conn.run().await.context("download failed")
+        });
     }
 }

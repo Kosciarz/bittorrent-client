@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use anyhow::Result;
 use tokio::sync::{mpsc, oneshot};
@@ -16,12 +16,12 @@ use crate::{
 pub struct TrackerManager {
     info: Arc<TorrentInfo>,
     client: Client,
-    tracker: Tracker,
-    tracker_list: Vec<Vec<Tracker>>,
+    trackers: Vec<Tracker>,
     cancellation_token: CancellationToken,
+    peers: HashMap<SocketAddr, Peer>,
 
     stats_manager_command_tx: mpsc::Sender<StatsManagerCommand>,
-    peer_tx: mpsc::Sender<Vec<Peer>>,
+    peer_tx: mpsc::Sender<Peer>,
 }
 
 impl TrackerManager {
@@ -30,34 +30,30 @@ impl TrackerManager {
         client: Client,
         cancellation_token: CancellationToken,
         stats_manager_command_tx: mpsc::Sender<StatsManagerCommand>,
-        peer_tx: mpsc::Sender<Vec<Peer>>,
+        peer_tx: mpsc::Sender<Peer>,
     ) -> Self {
-        let tracker = Tracker::new(info.announce.clone());
+        let mut trackers = Vec::new();
+        trackers.push(Tracker::new(info.announce.clone()));
 
-        let mut tracker_list = Vec::new();
         for tier in &info.announce_list {
-            let mut trackers = Vec::new();
-
-            for tracker in tier {
-                trackers.push(Tracker::new(tracker.clone()));
+            for url in tier {
+                trackers.push(Tracker::new(url.clone()));
             }
-
-            tracker_list.push(trackers);
         }
 
         Self {
             info,
             client,
-            tracker,
-            tracker_list,
+            trackers,
             cancellation_token,
+            peers: HashMap::new(),
             stats_manager_command_tx,
             peer_tx,
         }
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        let mut interval = tokio::time::interval(self.tracker.interval());
+        let mut interval = tokio::time::interval(self.trackers[0].interval());
 
         loop {
             tokio::select! {
@@ -72,21 +68,28 @@ impl TrackerManager {
 
                     let stats = rx.await?;
 
-                    let addrs = self
-                        .tracker
-                        .announce(
+                    for tracker in &self.trackers {
+                        match tracker.announce(
                             &self.info.info_hash,
                             &self.client.peer_id,
                             self.client.port,
                             &AnnounceStats { uploaded: stats.uploaded, downloaded: stats.downloaded, left: stats.left },
-                        )
-                        .await?;
-
-                    let peers: Vec<Peer> = addrs.iter().map(|addr| Peer {addr: *addr}).collect();
-
-                    if !peers.is_empty() {
-                        self.peer_tx.send(peers).await?;
+                        ).await {
+                            Ok(addrs) => {
+                                for addr in addrs {
+                                    if !self.peers.contains_key(&addr) {
+                                        self.peers.insert(addr, Peer { addr });
+                                        let _ = self.peer_tx.send(self.peers[&addr].clone()).await;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Tracker {} failed: {}", tracker.url(), e);
+                                continue;
+                            }
+                        }
                     }
+
                 }
                 _ = self.cancellation_token.cancelled() => {
                     break Ok(());
