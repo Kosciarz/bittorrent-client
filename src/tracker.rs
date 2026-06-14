@@ -20,19 +20,35 @@ pub struct AnnounceStats {
 }
 
 #[derive(Debug)]
+pub enum TrackerType {
+    Http,
+    Udp,
+    Wss,
+}
+
+#[derive(Debug)]
 pub struct Tracker {
     url: Url,
     interval: Mutex<Duration>,
     last_announce: Mutex<Option<Instant>>,
+    tracker_type: TrackerType,
 }
 
 impl Tracker {
-    pub fn new(url: Url) -> Self {
-        Self {
+    pub fn new(url: Url) -> Result<Self> {
+        let tracker_type = match url.scheme() {
+            "http" | "https" => TrackerType::Http,
+            "udp" => TrackerType::Udp,
+            "wss" => TrackerType::Wss,
+            _ => bail!("unknown tracker type"),
+        };
+
+        Ok(Self {
             url,
             interval: Mutex::new(Duration::from_secs(1800)),
             last_announce: Mutex::new(None),
-        }
+            tracker_type,
+        })
     }
 
     pub fn url(&self) -> &Url {
@@ -59,6 +75,20 @@ impl Tracker {
         port: u16,
         stats: &AnnounceStats,
     ) -> Result<Vec<SocketAddr>> {
+        Ok(match self.tracker_type {
+            TrackerType::Http => self.announce_http(info_hash, peer_id, port, stats).await?,
+            TrackerType::Udp => self.announce_udp().await?,
+            TrackerType::Wss => self.announce_wss().await?,
+        })
+    }
+
+    async fn announce_http(
+        &self,
+        info_hash: &[u8; 20],
+        peer_id: &[u8; 20],
+        port: u16,
+        stats: &AnnounceStats,
+    ) -> Result<Vec<SocketAddr>> {
         let url = self.build_announce_url(info_hash, peer_id, port, stats);
         let res = reqwest::get(url).await?.bytes().await?;
         let obj = decode_object(&res);
@@ -75,6 +105,14 @@ impl Tracker {
         let peers_bytes = extract_byte_array(&dict, b"peers")?;
 
         Ok(Self::parse_compact_peers(&peers_bytes))
+    }
+
+    async fn announce_udp(&self) -> Result<Vec<SocketAddr>> {
+        bail!("udp tracker announce not implemented");
+    }
+
+    async fn announce_wss(&self) -> Result<Vec<SocketAddr>> {
+        bail!("wss tracker announce not implemented");
     }
 
     fn build_announce_url(

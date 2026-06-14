@@ -33,12 +33,23 @@ impl TrackerManager {
         peer_tx: mpsc::Sender<Peer>,
     ) -> Self {
         let mut trackers = Vec::new();
-        trackers.push(Tracker::new(info.announce.clone()));
+
+        match Tracker::new(info.announce.clone()) {
+            Ok(t) => trackers.push(t),
+            Err(e) => eprintln!("invalid announce URL {}: {}", info.announce, e),
+        };
 
         for tier in &info.announce_list {
             for url in tier {
-                trackers.push(Tracker::new(url.clone()));
+                match Tracker::new(url.clone()) {
+                    Ok(t) => trackers.push(t),
+                    Err(e) => eprintln!("invalid tracker URL {}: {}", url, e),
+                }
             }
+        }
+
+        if trackers.is_empty() {
+            eprintln!("no usable trackers found");
         }
 
         Self {
